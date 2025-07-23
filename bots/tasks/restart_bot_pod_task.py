@@ -7,7 +7,7 @@ from kubernetes import client, config
 from bots.models import Bot, BotEventTypes
 
 logger = logging.getLogger(__name__)
-from bots.bot_pod_creator import BotPodCreator
+from bots.task_pod_creator import TaskPodCreator
 
 
 @shared_task(bind=True, soft_time_limit=3600)
@@ -78,7 +78,7 @@ def restart_bot_pod(self, bot_id):
     bot.last_heartbeat_timestamp = None
     bot.save()
 
-    bot_pod_creator = BotPodCreator()
-    bot_pod_create_result = bot_pod_creator.create_bot_pod(bot_id=bot.id, bot_name=bot.k8s_pod_name(), bot_cpu_request=bot.cpu_request())
+    task_pod_creator = TaskPodCreator()
+    bot_pod_create_result = task_pod_creator.create_task_pod(id=bot.id, name=bot.k8s_pod_name(), cpu_request=bot.cpu_request(), command=bot.k8s_run_command())
 
     logger.info(f"Bot pod create result: {bot_pod_create_result}")

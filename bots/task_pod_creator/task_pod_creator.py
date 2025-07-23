@@ -1,12 +1,14 @@
 import os
-import uuid
-from typing import Dict, Optional
+from typing import Dict
 
 from kubernetes import client, config
 
 # fmt: off
 
-class BotPodCreator:
+# For creating pods that are for a one-off task, similar to a celery task.
+# For now it is used for meeting app sessions and bots.
+# This class used to be only for creating pods for bots, that's why there's some bot-specific things in there.
+class TaskPodCreator:
     def __init__(self, namespace: str = "attendee"):
         try:
             config.load_incluster_config()
@@ -28,29 +30,26 @@ class BotPodCreator:
         default_pod_image = f"nduncan{self.app_name}/{self.app_name}"
         self.image = f"{os.getenv('BOT_POD_IMAGE', default_pod_image)}:{self.app_version}"
 
-    def create_bot_pod(
+    def create_task_pod(
         self,
-        bot_id: int,
-        bot_name: Optional[str] = None,
-        bot_cpu_request: Optional[int] = None,
+        name: str,
+        cpu_request: int,
+        run_command: str
     ) -> Dict:
         """
-        Create a bot pod with configuration from environment.
+        Create a worker pod with configuration from environment.
         
         Args:
-            bot_id: Integer ID of the bot to run
-            bot_name: Optional name for the bot (will generate if not provided)
+            name: Name for the pod
+            cpu_request: CPU request for the pod
+            run_command: Command to run in the pod
         """
-        if bot_name is None:
-            bot_name = f"bot-{bot_id}-{uuid.uuid4().hex[:8]}"
 
-        if bot_cpu_request is None:
-            bot_cpu_request = os.getenv("BOT_CPU_REQUEST", "4")
+        if cpu_request is None:
+            cpu_request = os.getenv("CPU_REQUEST", "4")
 
-        # Set the command based on bot_id
-        # Run entrypoint script first, then the bot command
-        bot_cmd = f"python manage.py run_bot --botid {bot_id}"
-        command = ["/bin/bash", "-c", f"/opt/bin/entrypoint.sh && {bot_cmd}"]
+        # Run entrypoint script first, then the run command
+        command = ["/bin/bash", "-c", f"/opt/bin/entrypoint.sh && {run_command}"]
 
         # Metadata labels matching the deployment
         labels = {
@@ -63,7 +62,7 @@ class BotPodCreator:
 
         pod = client.V1Pod(
             metadata=client.V1ObjectMeta(
-                name=bot_name,
+                name=name,
                 namespace=self.namespace,
                 labels=labels
             ),
@@ -76,7 +75,7 @@ class BotPodCreator:
                         command=command,
                         resources=client.V1ResourceRequirements(
                             requests={
-                                "cpu": bot_cpu_request,
+                                "cpu": cpu_request,
                                 "memory": os.getenv("BOT_MEMORY_REQUEST", "4Gi"),
                                 "ephemeral-storage": os.getenv("BOT_EPHEMERAL_STORAGE_REQUEST", "10Gi")
                             },
@@ -144,24 +143,8 @@ class BotPodCreator:
             
         except client.ApiException as e:
             return {
-                "name": bot_name,
+                "name": name,
                 "status": "Error",
                 "created": False,
                 "error": str(e)
             }
-
-    def delete_bot_pod(self, pod_name: str) -> Dict:
-        try:
-            self.v1.delete_namespaced_pod(
-                name=pod_name,
-                namespace=self.namespace,
-                grace_period_seconds=60
-            )
-            return {"deleted": True}
-        except client.ApiException as e:
-            return {
-                "deleted": False,
-                "error": str(e)
-            }
-
-# fmt: on

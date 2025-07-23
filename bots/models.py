@@ -164,6 +164,9 @@ class Bot(models.Model):
     join_at = models.DateTimeField(null=True, blank=True, help_text="The time the bot should join the meeting")
     deduplication_key = models.CharField(max_length=1024, null=True, blank=True, help_text="Optional key for deduplicating bots")
 
+    def k8s_run_command(self):
+        return f"python manage.py run_bot --botid {self.id}"
+
     def delete_data(self):
         # Check if bot is in a state where the data deleted event can be created
         if not BotEventManager.event_can_be_created_for_state(BotEventTypes.DATA_DELETED, self.state):
@@ -1044,6 +1047,250 @@ class BotEventManager:
                 continue
 
 
+class MeetingAppSessionStates(models.IntegerChoices):
+    READY = 1, "Ready"
+    CONNECTING = 2, "Connecting"
+    CONNECTED = 3, "Connected"
+    POST_PROCESSING = 4, "Post Processing"
+    ENDED = 5, "Ended"
+    FATAL_ERROR = 6, "Fatal Error"
+
+    @classmethod
+    def state_to_api_code(cls, value):
+        """Returns the API code for a given state value"""
+        mapping = {
+            cls.READY: "ready",
+            cls.CONNECTING: "connecting",
+            cls.CONNECTED: "connected",
+            cls.POST_PROCESSING: "post_processing",
+            cls.ENDED: "ended",
+            cls.FATAL_ERROR: "fatal_error",
+        }
+        return mapping.get(value)
+
+
+class MeetingAppSession(models.Model):
+    OBJECT_ID_PREFIX = "mas_"
+    object_id = models.CharField(max_length=32, unique=True, editable=False)
+
+    settings = models.JSONField(null=False, default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    zoom_rtms_stream_id = models.CharField(max_length=255, null=True, blank=True)
+    version = IntegerVersionField()
+    state = models.IntegerField(choices=MeetingAppSessionStates.choices, default=MeetingAppSessionStates.READY, null=False)
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="meeting_app_sessions")
+    metadata = models.JSONField(null=False, default=dict)
+
+    def save(self, *args, **kwargs):
+        if not self.object_id:
+            # Generate a random 16-character string
+            random_string = "".join(random.choices(string.ascii_letters + string.digits, k=16))
+            self.object_id = f"{self.OBJECT_ID_PREFIX}{random_string}"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"Meeting application session at {self.created_at}"
+
+    def k8s_pod_name(self):
+        return f"mas-pod-{self.id}-{self.object_id}".lower().replace("_", "-")
+
+    def k8s_run_command(self):
+        return f"python manage.py run_meeting_app_session --meeting_app_session_id {self.id}"
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["zoom_rtms_stream_id"], name="unique_zoom_rtms_stream_id")]
+
+
+class MeetingAppSessionEventTypes(models.IntegerChoices):
+    CONNECTION_REQUESTED = 1, "Connection Requested"
+    CONNECTION_ESTABLISHED = 2, "Connection Established"
+    CONNECTION_FAILED = 3, "Connection Failed"
+    CONNECTION_ENDED = 4, "Connection Ended"
+    POST_PROCESSING_COMPLETED = 5, "Post Processing Completed"
+
+    @classmethod
+    def type_to_api_code(cls, value):
+        """Returns the API code for a given type value"""
+        mapping = {
+            cls.CONNECTION_REQUESTED: "connection_requested",
+            cls.CONNECTION_ESTABLISHED: "connection_established",
+            cls.CONNECTION_FAILED: "connection_failed",
+            cls.CONNECTION_ENDED: "connection_ended",
+            cls.POST_PROCESSING_COMPLETED: "post_processing_completed",
+        }
+        return mapping.get(value)
+
+
+class MeetingAppSessionEventSubTypes(models.IntegerChoices):
+    FATAL_ERROR_MEETING_APP_SESSION_NOT_LAUNCHED = 1, "Fatal Error Meeting App Session Not Launched"
+
+    @classmethod
+    def sub_type_to_api_code(cls, value):
+        """Returns the API code for a given sub-type value"""
+        mapping = {
+            cls.FATAL_ERROR_MEETING_APP_SESSION_NOT_LAUNCHED: "fatal_error_meeting_app_session_not_launched",
+        }
+        return mapping.get(value)
+
+
+class MeetingAppSessionEvent(models.Model):
+    meeting_app_session = models.ForeignKey(MeetingAppSession, on_delete=models.CASCADE, related_name="events")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    old_state = models.IntegerField(choices=MeetingAppSessionStates.choices)
+    new_state = models.IntegerField(choices=MeetingAppSessionStates.choices)
+
+    event_type = models.IntegerField(choices=MeetingAppSessionEventTypes.choices)
+    event_sub_type = models.IntegerField(choices=MeetingAppSessionEventSubTypes.choices, null=True, blank=True)
+    metadata = models.JSONField(null=False, default=dict)
+    version = IntegerVersionField()
+
+    def __str__(self):
+        old_state_str = MeetingAppSessionStates(self.old_state).label
+        new_state_str = MeetingAppSessionStates(self.new_state).label
+
+        return f"{self.meeting_app_session.object_id} - [{MeetingAppSessionEventTypes(self.event_type).label}] - {old_state_str} -> {new_state_str}"
+
+    class Meta:
+        ordering = ["created_at"]
+
+
+class MeetingAppSessionEventManager:
+    # Define valid state transitions for each event type
+    VALID_TRANSITIONS = {
+        MeetingAppSessionEventTypes.CONNECTION_REQUESTED: {
+            "from": MeetingAppSessionStates.READY,
+            "to": MeetingAppSessionStates.CONNECTING,
+        },
+        MeetingAppSessionEventTypes.CONNECTION_ESTABLISHED: {
+            "from": MeetingAppSessionStates.CONNECTING,
+            "to": MeetingAppSessionStates.CONNECTED,
+        },
+        MeetingAppSessionEventTypes.CONNECTION_FAILED: {
+            "from": MeetingAppSessionStates.CONNECTING,
+            "to": MeetingAppSessionStates.FATAL_ERROR,
+        },
+        MeetingAppSessionEventTypes.CONNECTION_ENDED: {
+            "from": [MeetingAppSessionStates.CONNECTED, MeetingAppSessionStates.CONNECTING],
+            "to": MeetingAppSessionStates.POST_PROCESSING,
+        },
+        MeetingAppSessionEventTypes.POST_PROCESSING_COMPLETED: {
+            "from": MeetingAppSessionStates.POST_PROCESSING,
+            "to": MeetingAppSessionStates.ENDED,
+        },
+    }
+
+    @classmethod
+    def event_can_be_created_for_state(cls, event_type: MeetingAppSessionEventTypes, state: MeetingAppSessionStates):
+        transition = cls.VALID_TRANSITIONS.get(event_type)
+        if not transition:
+            return False
+
+        valid_from_states = transition["from"]
+        if not isinstance(valid_from_states, (list, tuple)):
+            valid_from_states = [valid_from_states]
+
+        return state in valid_from_states
+
+    @classmethod
+    def is_post_meeting_state(cls, state: int):
+        return state in [MeetingAppSessionStates.ENDED, MeetingAppSessionStates.FATAL_ERROR]
+
+    @classmethod
+    def create_event(
+        cls,
+        meeting_app_session: MeetingAppSession,
+        event_type: int,
+        event_sub_type: int = None,
+        event_metadata: dict = None,
+        max_retries: int = 3,
+    ) -> MeetingAppSessionEvent:
+        """
+        Creates a new event and updates the meeting app session state, handling concurrency issues.
+
+        Args:
+            meeting_app_session: The MeetingAppSession instance
+            event_type: The type of event (from MeetingAppSessionEventTypes)
+            event_sub_type: The sub-type of event (from MeetingAppSessionEventSubTypes)
+            event_metadata: Optional metadata dictionary (defaults to empty dict)
+            max_retries: Maximum number of retries for concurrent modifications
+
+        Returns:
+            MeetingAppSessionEvent instance
+
+        Raises:
+            ValidationError: If the state transition is not valid
+        """
+        if event_metadata is None:
+            event_metadata = {}
+        retry_count = 0
+
+        while retry_count < max_retries:
+            try:
+                with transaction.atomic():
+                    # Get fresh meeting app session state
+                    meeting_app_session.refresh_from_db()
+                    old_state = meeting_app_session.state
+
+                    # Get valid transition for this event type
+                    transition = cls.VALID_TRANSITIONS.get(event_type)
+                    if not transition:
+                        raise ValidationError(f"No valid transitions defined for event type {event_type}")
+
+                    # Check if current state is valid for this transition
+                    valid_from_states = transition["from"]
+                    if not isinstance(valid_from_states, (list, tuple)):
+                        valid_from_states = [valid_from_states]
+
+                    if old_state not in valid_from_states:
+                        valid_states_labels = [MeetingAppSessionStates.state_to_api_code(state) for state in valid_from_states]
+                        raise ValidationError(f"Event {MeetingAppSessionEventTypes.type_to_api_code(event_type)} not allowed when meeting app session is in state {MeetingAppSessionStates.state_to_api_code(old_state)}. It is only allowed in these states: {', '.join(valid_states_labels)}")
+
+                    # Update meeting app session state based on 'to' definition
+                    new_state = transition["to"]
+                    meeting_app_session.state = new_state
+
+                    meeting_app_session.save()  # This will raise RecordModifiedError if version mismatch
+
+                    # Check that state wasn't modified by another thread
+                    if meeting_app_session.state != new_state:
+                        raise ValidationError(f"Meeting app session state was modified by another thread to be '{MeetingAppSessionStates.state_to_api_code(meeting_app_session.state)}' instead of '{MeetingAppSessionStates.state_to_api_code(new_state)}'.")
+
+                    # Create event record
+                    event = MeetingAppSessionEvent.objects.create(
+                        meeting_app_session=meeting_app_session,
+                        old_state=old_state,
+                        new_state=meeting_app_session.state,
+                        event_type=event_type,
+                        event_sub_type=event_sub_type,
+                        metadata=event_metadata,
+                    )
+
+                    # TODO: Add webhook trigger for meeting app session events if needed
+                    # trigger_webhook(
+                    #     webhook_trigger_type=WebhookTriggerTypes.MEETING_APP_SESSION_STATE_CHANGE,
+                    #     meeting_app_session=meeting_app_session,
+                    #     payload={
+                    #         "event_type": MeetingAppSessionEventTypes.type_to_api_code(event_type),
+                    #         "event_metadata": event_metadata,
+                    #         "old_state": MeetingAppSessionStates.state_to_api_code(old_state),
+                    #         "new_state": MeetingAppSessionStates.state_to_api_code(meeting_app_session.state),
+                    #         "created_at": event.created_at.isoformat(),
+                    #     },
+                    # )
+
+                    return event
+
+            except RecordModifiedError:
+                retry_count += 1
+                if retry_count >= max_retries:
+                    raise
+                continue
+
+
 class Participant(models.Model):
     bot = models.ForeignKey(Bot, on_delete=models.CASCADE, related_name="participants")
     uuid = models.CharField(max_length=255)
@@ -1185,7 +1432,8 @@ class RecordingStorage(S3Boto3Storage):
 
 
 class Recording(models.Model):
-    bot = models.ForeignKey(Bot, on_delete=models.CASCADE, related_name="recordings")
+    bot = models.ForeignKey(Bot, on_delete=models.CASCADE, related_name="recordings", null=True, blank=True)
+    meeting_app_session = models.ForeignKey(MeetingAppSession, on_delete=models.CASCADE, related_name="recordings", null=True, blank=True)
 
     recording_type = models.IntegerField(choices=RecordingTypes.choices, null=False)
 
@@ -1215,7 +1463,11 @@ class Recording(models.Model):
     file = models.FileField(storage=RecordingStorage())
 
     def __str__(self):
-        return f"Recording for {self.bot.object_id}"
+        if self.bot:
+            return f"Recording for {self.bot.object_id}"
+        if self.meeting_app_session:
+            return f"Recording for {self.meeting_app_session.object_id}"
+        return f"Recording {self.object_id}"
 
     @property
     def url(self):
@@ -1236,6 +1488,13 @@ class Recording(models.Model):
             # Generate a random 16-character string
             random_string = "".join(random.choices(string.ascii_letters + string.digits, k=16))
             self.object_id = f"{self.OBJECT_ID_PREFIX}{random_string}"
+
+        # Must contain a bot or meeting_app_session but not both
+        if self.bot and self.meeting_app_session:
+            raise ValueError("Recording must contain a bot or meeting_app_session but not both")
+        if not self.bot and not self.meeting_app_session:
+            raise ValueError("Recording must contain a bot or meeting_app_session")
+
         super().save(*args, **kwargs)
 
 

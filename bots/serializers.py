@@ -21,6 +21,8 @@ from .models import (
     BotStates,
     ChatMessageToOptions,
     MediaBlob,
+    MeetingAppSession,
+    MeetingAppSessionStates,
     MeetingTypes,
     ParticipantEventTypes,
     Recording,
@@ -1310,3 +1312,137 @@ class PatchBotSerializer(serializers.Serializer):
             raise serializers.ValidationError("join_at cannot be in the past")
 
         return value
+
+
+@extend_schema_field(
+    {
+        "type": "object",
+        "properties": {
+            "meeting_uuid": {
+                "type": "string",
+                "description": "The UUID of the Zoom meeting",
+            },
+            "rtms_stream_id": {
+                "type": "string",
+                "description": "The RTMS stream ID for the Zoom meeting",
+            },
+            "server_urls": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of server URLs for the RTMS connection",
+            },
+        },
+        "required": ["meeting_uuid", "rtms_stream_id", "server_urls"],
+        "additionalProperties": False,
+    }
+)
+class ZoomRTMSJSONField(serializers.JSONField):
+    pass
+
+
+@extend_schema_serializer(
+    examples=[
+        OpenApiExample(
+            "Create Meeting App Session",
+            value={"zoom_rtms": {"meeting_uuid": "abc123def456", "rtms_stream_id": "stream_789", "server_urls": ["wss://rtms1.zoom.us", "wss://rtms2.zoom.us"]}, "transcription_settings": {"deepgram": {"language": "en"}}, "recording_settings": {"format": "mp4", "view": "speaker_view", "resolution": "1080p"}},
+            description="Example of creating a meeting app session with Zoom RTMS configuration",
+        )
+    ]
+)
+class CreateMeetingAppSessionSerializer(serializers.Serializer):
+    zoom_rtms = ZoomRTMSJSONField(help_text="Zoom RTMS configuration containing meeting UUID, stream ID, and server URLs", required=True)
+
+    transcription_settings = TranscriptionSettingsJSONField(
+        help_text="The transcription settings for the session, same format as used for bots",
+        required=False,
+        default=None,
+    )
+
+    recording_settings = RecordingSettingsJSONField(
+        help_text="The recording settings for the session, same format as used for bots",
+        required=False,
+        default={"format": RecordingFormats.MP4, "view": RecordingViews.SPEAKER_VIEW, "resolution": RecordingResolutions.HD_1080P},
+    )
+
+    ZOOM_RTMS_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "meeting_uuid": {"type": "string"},
+            "rtms_stream_id": {"type": "string"},
+            "server_urls": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+            },
+        },
+        "required": ["meeting_uuid", "rtms_stream_id", "server_urls"],
+        "additionalProperties": False,
+    }
+
+    def validate_zoom_rtms(self, value):
+        if value is None:
+            raise serializers.ValidationError("zoom_rtms is required")
+
+        try:
+            jsonschema.validate(instance=value, schema=self.ZOOM_RTMS_SCHEMA)
+        except jsonschema.exceptions.ValidationError as e:
+            raise serializers.ValidationError(e.message)
+
+        # Validate that server_urls contains valid URLs
+        server_urls = value.get("server_urls", [])
+        for url in server_urls:
+            if not isinstance(url, str) or not url.startswith(("ws://", "wss://")):
+                raise serializers.ValidationError({"server_urls": "All server URLs must be valid WebSocket URLs starting with ws:// or wss://"})
+
+        return value
+
+
+class MeetingAppSessionSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(source="object_id")
+    state = serializers.SerializerMethodField()
+    zoom_rtms = serializers.SerializerMethodField()
+    transcription_settings = serializers.SerializerMethodField()
+    recording_settings = serializers.SerializerMethodField()
+
+    @extend_schema_field(
+        {
+            "type": "string",
+            "enum": [MeetingAppSessionStates.state_to_api_code(state.value) for state in MeetingAppSessionStates],
+        }
+    )
+    def get_state(self, obj):
+        return MeetingAppSessionStates.state_to_api_code(obj.state)
+
+    @extend_schema_field(
+        {
+            "type": "object",
+            "properties": {
+                "meeting_uuid": {"type": "string"},
+                "rtms_stream_id": {"type": "string"},
+                "server_urls": {"type": "array", "items": {"type": "string"}},
+            },
+        }
+    )
+    def get_zoom_rtms(self, obj):
+        return obj.settings.get("zoom_rtms", {})
+
+    @extend_schema_field({"type": "object", "description": "Transcription settings"})
+    def get_transcription_settings(self, obj):
+        return obj.settings.get("transcription_settings", {})
+
+    @extend_schema_field({"type": "object", "description": "Recording settings"})
+    def get_recording_settings(self, obj):
+        return obj.settings.get("recording_settings", {})
+
+    class Meta:
+        model = MeetingAppSession
+        fields = [
+            "id",
+            "state",
+            "zoom_rtms",
+            "transcription_settings",
+            "recording_settings",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields

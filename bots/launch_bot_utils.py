@@ -11,10 +11,10 @@ def launch_bot(bot):
     # If this instance is running in Kubernetes, use the Kubernetes pod creator
     # which spins up a new pod for the bot
     if os.getenv("LAUNCH_BOT_METHOD") == "kubernetes":
-        from .bot_pod_creator import BotPodCreator
+        from .task_pod_creator import TaskPodCreator
 
-        bot_pod_creator = BotPodCreator()
-        create_pod_result = bot_pod_creator.create_bot_pod(bot_id=bot.id, bot_name=bot.k8s_pod_name(), bot_cpu_request=bot.cpu_request())
+        task_pod_creator = TaskPodCreator()
+        create_pod_result = task_pod_creator.create_task_pod(id=bot.id, name=bot.k8s_pod_name(), cpu_request=bot.cpu_request(), command=bot.k8s_run_command())
         logger.info(f"Bot {bot.object_id} ({bot.id}) launched via Kubernetes: {create_pod_result}")
         if not create_pod_result.get("created"):
             logger.error(f"Bot {bot.object_id} ({bot.id}) failed to launch via Kubernetes.")
