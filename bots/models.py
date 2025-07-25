@@ -1099,6 +1099,12 @@ class MeetingAppSession(models.Model):
     def k8s_run_command(self):
         return f"python manage.py run_meeting_app_session --meeting_app_session_id {self.id}"
 
+    def zoom_rtms(self):
+        return self.settings.get("zoom_rtms", {})
+
+    def last_meeting_app_session_event(self):
+        return self.events.order_by("-created_at").first()
+
     class Meta:
         constraints = [models.UniqueConstraint(fields=["zoom_rtms_stream_id"], name="unique_zoom_rtms_stream_id")]
 
@@ -1109,6 +1115,7 @@ class MeetingAppSessionEventTypes(models.IntegerChoices):
     CONNECTION_FAILED = 3, "Connection Failed"
     CONNECTION_ENDED = 4, "Connection Ended"
     POST_PROCESSING_COMPLETED = 5, "Post Processing Completed"
+    FATAL_ERROR = 6, "Fatal Error"
 
     @classmethod
     def type_to_api_code(cls, value):
@@ -1119,18 +1126,21 @@ class MeetingAppSessionEventTypes(models.IntegerChoices):
             cls.CONNECTION_FAILED: "connection_failed",
             cls.CONNECTION_ENDED: "connection_ended",
             cls.POST_PROCESSING_COMPLETED: "post_processing_completed",
+            cls.FATAL_ERROR: "fatal_error",
         }
         return mapping.get(value)
 
 
 class MeetingAppSessionEventSubTypes(models.IntegerChoices):
     FATAL_ERROR_MEETING_APP_SESSION_NOT_LAUNCHED = 1, "Fatal Error Meeting App Session Not Launched"
+    FATAL_ERROR_PROCESS_TERMINATED = 2, "Fatal Error Process Terminated"
 
     @classmethod
     def sub_type_to_api_code(cls, value):
         """Returns the API code for a given sub-type value"""
         mapping = {
             cls.FATAL_ERROR_MEETING_APP_SESSION_NOT_LAUNCHED: "fatal_error_meeting_app_session_not_launched",
+            cls.FATAL_ERROR_PROCESS_TERMINATED: "fatal_error_process_terminated",
         }
         return mapping.get(value)
 
@@ -1147,6 +1157,7 @@ class MeetingAppSessionEvent(models.Model):
     event_sub_type = models.IntegerField(choices=MeetingAppSessionEventSubTypes.choices, null=True, blank=True)
     metadata = models.JSONField(null=False, default=dict)
     version = IntegerVersionField()
+    requested_meeting_app_session_action_taken_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         old_state_str = MeetingAppSessionStates(self.old_state).label
@@ -1181,6 +1192,10 @@ class MeetingAppSessionEventManager:
             "from": MeetingAppSessionStates.POST_PROCESSING,
             "to": MeetingAppSessionStates.ENDED,
         },
+        MeetingAppSessionEventTypes.FATAL_ERROR: {
+            "from": [MeetingAppSessionStates.CONNECTED, MeetingAppSessionStates.CONNECTING],
+            "to": MeetingAppSessionStates.FATAL_ERROR,
+        },
     }
 
     @classmethod
@@ -1198,6 +1213,30 @@ class MeetingAppSessionEventManager:
     @classmethod
     def is_post_meeting_state(cls, state: int):
         return state in [MeetingAppSessionStates.ENDED, MeetingAppSessionStates.FATAL_ERROR]
+
+    @classmethod
+    def set_requested_meeting_app_session_action_taken_at(cls, meeting_app_session: MeetingAppSession):
+        event_type = {
+            MeetingAppSessionStates.CONNECTING: MeetingAppSessionEventTypes.CONNECTION_REQUESTED,
+            MeetingAppSessionStates.POST_PROCESSING: MeetingAppSessionEventTypes.CONNECTION_ENDED,
+        }.get(meeting_app_session.state)
+
+        if event_type is None:
+            raise ValueError(f"Meeting app session {meeting_app_session.object_id} is in state {meeting_app_session.state}. This is not a valid state to initiate a meeting app session request.")
+
+        last_meeting_app_session_event = meeting_app_session.last_meeting_app_session_event()
+
+        if last_meeting_app_session_event is None:
+            raise ValueError(f"Meeting app session {meeting_app_session.object_id} has no meeting app session events. This is not a valid state to initiate a meeting app session request.")
+
+        if last_meeting_app_session_event.event_type != event_type:
+            raise ValueError(f"Meeting app session {meeting_app_session.object_id} has unexpected event type {last_meeting_app_session_event.event_type}. We expected {event_type} since it's in state {meeting_app_session.state}")
+
+        if last_meeting_app_session_event.requested_meeting_app_session_action_taken_at is not None:
+            raise ValueError(f"Meeting app session {meeting_app_session.object_id} has already initiated this meeting app session request")
+
+        last_meeting_app_session_event.requested_meeting_app_session_action_taken_at = timezone.now()
+        last_meeting_app_session_event.save()
 
     @classmethod
     def create_event(

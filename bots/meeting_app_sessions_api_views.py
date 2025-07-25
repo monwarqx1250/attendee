@@ -1,5 +1,6 @@
 import logging
 
+from django.core.exceptions import ValidationError
 from drf_spectacular.utils import (
     OpenApiExample,
     OpenApiParameter,
@@ -12,8 +13,8 @@ from rest_framework.views import APIView
 
 from .authentication import ApiKeyAuthentication
 from .launch_meeting_app_session_utils import launch_meeting_app_session
-from .meeting_app_sessions_api_utils import create_meeting_app_session
-from .models import MeetingAppSession
+from .meeting_app_sessions_api_utils import create_meeting_app_session, send_sync_command
+from .models import MeetingAppSession, MeetingAppSessionEventManager, MeetingAppSessionEventTypes
 from .serializers import CreateMeetingAppSessionSerializer, MeetingAppSessionSerializer
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,33 @@ class MeetingAppSessionCreateView(APIView):
             )
 
 
+class MeetingAppSessionEndView(APIView):
+    authentication_classes = [ApiKeyAuthentication]
+
+    @extend_schema(
+        operation_id="End Meeting App Session",
+        summary="End a meeting app session",
+    )
+    def post(self, request):
+        try:
+            rtms_stream_id = request.data.get("zoom_rtms").get("rtms_stream_id")
+            meeting_app_session = MeetingAppSession.objects.get(zoom_rtms_stream_id=rtms_stream_id, project=request.auth.project)
+
+            MeetingAppSessionEventManager.create_event(
+                meeting_app_session=meeting_app_session,
+                event_type=MeetingAppSessionEventTypes.CONNECTION_ENDED,
+            )
+
+            send_sync_command(meeting_app_session, "sync")
+
+            return Response(MeetingAppSessionSerializer(meeting_app_session).data, status=status.HTTP_200_OK)
+        except ValidationError as e:
+            logging.error(f"Error ending meeting app session: {str(e)} (rtms_stream_id={rtms_stream_id})")
+            return Response({"error": e.messages[0]}, status=status.HTTP_400_BAD_REQUEST)
+        except MeetingAppSession.DoesNotExist:
+            return Response({"error": "Meeting app session not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
 class MeetingAppSessionDetailView(APIView):
     authentication_classes = [ApiKeyAuthentication]
 
@@ -141,7 +169,7 @@ class MeetingAppSessionDetailView(APIView):
     )
     def get(self, request, object_id):
         try:
-            session = MeetingAppSession.objects.get(object_id=object_id)
+            session = MeetingAppSession.objects.get(object_id=object_id, project=request.auth.project)
             return Response(MeetingAppSessionSerializer(session).data)
 
         except MeetingAppSession.DoesNotExist:

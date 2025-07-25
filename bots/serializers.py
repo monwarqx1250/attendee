@@ -1369,11 +1369,8 @@ class CreateMeetingAppSessionSerializer(serializers.Serializer):
         "properties": {
             "meeting_uuid": {"type": "string"},
             "rtms_stream_id": {"type": "string"},
-            "server_urls": {
-                "type": "array",
-                "items": {"type": "string"},
-                "minItems": 1,
-            },
+            "server_urls": {"type": "string"},
+            "operator_id": {"type": "string"},
         },
         "required": ["meeting_uuid", "rtms_stream_id", "server_urls"],
         "additionalProperties": False,
@@ -1387,12 +1384,6 @@ class CreateMeetingAppSessionSerializer(serializers.Serializer):
             jsonschema.validate(instance=value, schema=self.ZOOM_RTMS_SCHEMA)
         except jsonschema.exceptions.ValidationError as e:
             raise serializers.ValidationError(e.message)
-
-        # Validate that server_urls contains valid URLs
-        server_urls = value.get("server_urls", [])
-        for url in server_urls:
-            if not isinstance(url, str) or not url.startswith(("ws://", "wss://")):
-                raise serializers.ValidationError({"server_urls": "All server URLs must be valid WebSocket URLs starting with ws:// or wss://"})
 
         return value
 

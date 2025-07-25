@@ -1,5 +1,8 @@
+import json
 import logging
+import os
 
+import redis
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
@@ -16,6 +19,14 @@ from .models import (
 from .serializers import CreateMeetingAppSessionSerializer
 
 logger = logging.getLogger(__name__)
+
+
+def send_sync_command(meeting_app_session, command="sync"):
+    redis_url = os.getenv("REDIS_URL") + ("?ssl_cert_reqs=none" if os.getenv("DISABLE_REDIS_SSL") else "")
+    redis_client = redis.from_url(redis_url)
+    channel = f"meeting_app_session_{meeting_app_session.id}"
+    message = {"command": command}
+    redis_client.publish(channel, json.dumps(message))
 
 
 def create_meeting_app_session(data: dict, project: Project) -> tuple[MeetingAppSession | None, dict | None]:
