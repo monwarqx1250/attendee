@@ -11,6 +11,7 @@ from django.urls import reverse
 from .models import (
     AppSession,
     Bot,
+    BotSession,
     BotChatMessageRequest,
     BotEventManager,
     BotEventTypes,
@@ -188,7 +189,7 @@ def create_bot(data: dict, source: BotCreationSource, project: Project) -> tuple
 
     try:
         with transaction.atomic():
-            bot = Bot.objects.create(
+            bot = BotSession.objects.create(
                 project=project,
                 meeting_url=meeting_url,
                 name=bot_name,
@@ -284,6 +285,8 @@ def create_app_session(data: dict, source: BotCreationSource, project: Project) 
                 deduplication_key=deduplication_key,
                 state=initial_state,
                 zoom_rtms_stream_id=zoom_rtms.get("rtms_stream_id"),
+                meeting_url="app_session",
+                name="App Session"
             )
 
             Recording.objects.create(

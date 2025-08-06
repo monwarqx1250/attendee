@@ -53,10 +53,14 @@
 
 <div class="container mt-4">
     <div class="d-flex justify-content-between align-items-center mb-4">
-        <h2>Bots</h2>
-        <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createBotModal">
-            <i class="bi bi-plus-circle me-1"></i> Create Bot
-        </button>
+        {% if session_type == "bot_sessions" %}
+            <h2>Bots</h2>
+            <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createBotModal">
+                <i class="bi bi-plus-circle me-1"></i> Create Bot
+            </button>
+        {% elif session_type == "app_sessions" %}
+            <h2>App Sessions</h2>
+        {% endif %}
     </div>
     
     <!-- Filters Collapsible Panel -->
@@ -117,7 +121,9 @@
                 <thead>
                     <tr>
                         <th>ID</th>
-                        <th>Meeting URL</th>
+                        {% if session_type == "bot_sessions" %}
+                            <th>Meeting URL</th>
+                        {% endif %}
                         <th>Status</th>
                         <th>Last Event</th>
                         {% if has_scheduled_bots %}<th>Join At</th>{% endif %}
@@ -133,7 +139,9 @@
                         hx-swap="outerHTML"
                         hx-push-url="true">
                         <td><small>{{ bot.object_id }}</small></td>
-                        <td><span class="meeting-url" title="{{ bot.meeting_url }}">{{ bot.meeting_url }}</span></td>
+                        {% if session_type == "bot_sessions" %}
+                            <td><span class="meeting-url" title="{{ bot.meeting_url }}">{{ bot.meeting_url }}</span></td>
+                        {% endif %}
                         <td>
                             <span class="badge {% if bot.state == BotStates.READY %}bg-warning{% elif bot.state == BotStates.FATAL_ERROR %}bg-danger{% elif bot.state == BotStates.ENDED %}bg-secondary{% else %}bg-success{% endif %}">
                                 {{ bot.get_state_display }}

@@ -124,6 +124,16 @@
                        onclick="setActiveLink(this)">
                         <i class="bi bi-robot"></i> Bots
                     </a>
+
+                    <a class="nav-link" 
+                       hx-get="{% url 'projects:project-app-sessions' project.object_id %}" 
+                       hx-select="#content"
+                       hx-target="#content"
+                       hx-swap="outerHTML"
+                       hx-push-url="true"
+                       onclick="setActiveLink(this)">
+                        <i class="bi bi-robot"></i> App Sessions
+                    </a>
                 </nav>
                 
                 <!-- Added logout link at bottom -->

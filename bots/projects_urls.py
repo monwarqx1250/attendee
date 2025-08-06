@@ -17,8 +17,13 @@ urlpatterns = [
     ),
     path(
         "<str:object_id>/bots",
-        projects_views.ProjectBotsView.as_view(),
+        projects_views.ProjectBotsView.as_view(session_type="bot_sessions"),
         name="project-bots",
+    ),
+    path(
+        "<str:object_id>/app_sessions",
+        projects_views.ProjectBotsView.as_view(session_type="app_sessions"),
+        name="project-app-sessions",
     ),
     path(
         "<str:object_id>/bots/create",

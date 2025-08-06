@@ -24,6 +24,9 @@ from .launch_bot_utils import launch_bot
 from .models import (
     ApiKey,
     Bot,
+    SessionTypes,
+    AppSession,
+    BotSession,
     BotEvent,
     BotEventSubTypes,
     BotEventTypes,
@@ -316,12 +319,21 @@ class ProjectBotsView(LoginRequiredMixin, ProjectUrlContextMixin, ListView):
     template_name = "projects/project_bots.html"
     context_object_name = "bots"
     paginate_by = 20
+    session_type = None
+
+    def get_session_type(self):
+        """Get session type from class attribute"""
+        return self.session_type
 
     def get_queryset(self):
         project = get_project_for_user(user=self.request.user, project_object_id=self.kwargs["object_id"])
-
-        # Start with the base queryset
-        queryset = Bot.objects.filter(project=project)
+        
+        # Choose model based on session type
+        session_type = self.get_session_type()
+        if session_type == "app_sessions":
+            queryset = AppSession.objects.filter(project=project)
+        else:
+            queryset = BotSession.objects.filter(project=project)
 
         # Apply date filters if provided
         start_date = self.request.GET.get("start_date")
@@ -377,6 +389,9 @@ class ProjectBotsView(LoginRequiredMixin, ProjectUrlContextMixin, ListView):
 
         # Add BotStates for the template
         context["BotStates"] = BotStates
+
+        # Add session type to context
+        context["session_type"] = self.get_session_type()
 
         # Add filter parameters to context for maintaining state
         context["filter_params"] = {"start_date": self.request.GET.get("start_date", ""), "end_date": self.request.GET.get("end_date", ""), "states": self.request.GET.getlist("states")}
@@ -437,6 +452,7 @@ class ProjectBotDetailView(LoginRequiredMixin, ProjectUrlContextMixin, View):
             {
                 "bot": bot,
                 "BotStates": BotStates,
+                "SessionTypes": SessionTypes,
                 "RecordingStates": RecordingStates,
                 "RecordingTypes": RecordingTypes,
                 "RecordingTranscriptionStates": RecordingTranscriptionStates,

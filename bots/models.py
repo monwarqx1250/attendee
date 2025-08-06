@@ -597,7 +597,22 @@ class Bot(models.Model):
             models.UniqueConstraint(fields=["project", "deduplication_key"], name="unique_bot_deduplication_key", condition=~models.Q(state__in=BotStates.post_meeting_states())),
         ]
 
+class BotSessionManager(models.Manager):
+    def get_queryset(self):
+        return super().get_queryset().filter(session_type=SessionTypes.BOT)
 
+
+class BotSession(Bot):
+    OBJECT_ID_PREFIX = "bot_"
+    objects = BotSessionManager()
+
+    def save(self, *args, **kwargs):
+        self.session_type = SessionTypes.BOT
+        super().save(*args, **kwargs)
+
+    class Meta:
+        proxy = True
+        
 class AppSessionManager(models.Manager):
     def get_queryset(self):
         return super().get_queryset().filter(session_type=SessionTypes.APP_SESSION)
@@ -609,16 +624,6 @@ class AppSession(Bot):
 
     def save(self, *args, **kwargs):
         self.session_type = SessionTypes.APP_SESSION
-
-        if not self.meeting_url:
-            self.meeting_url = "app_session"
-        if not self.name:
-            self.name = "App Session"
-
-        if not self.object_id:
-            # Generate a random 16-character string
-            random_string = "".join(random.choices(string.ascii_letters + string.digits, k=16))
-            self.object_id = f"{self.OBJECT_ID_PREFIX}{random_string}"
         super().save(*args, **kwargs)
 
     class Meta:
