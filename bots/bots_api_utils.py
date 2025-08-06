@@ -11,12 +11,12 @@ from django.urls import reverse
 from .models import (
     AppSession,
     Bot,
-    BotSession,
     BotChatMessageRequest,
     BotEventManager,
     BotEventTypes,
     BotMediaRequest,
     BotMediaRequestMediaTypes,
+    BotSession,
     BotStates,
     CalendarEvent,
     Credentials,
@@ -286,7 +286,7 @@ def create_app_session(data: dict, source: BotCreationSource, project: Project) 
                 state=initial_state,
                 zoom_rtms_stream_id=zoom_rtms.get("rtms_stream_id"),
                 meeting_url="app_session",
-                name="App Session"
+                name="App Session",
             )
 
             Recording.objects.create(

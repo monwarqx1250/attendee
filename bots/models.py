@@ -597,6 +597,7 @@ class Bot(models.Model):
             models.UniqueConstraint(fields=["project", "deduplication_key"], name="unique_bot_deduplication_key", condition=~models.Q(state__in=BotStates.post_meeting_states())),
         ]
 
+
 class BotSessionManager(models.Manager):
     def get_queryset(self):
         return super().get_queryset().filter(session_type=SessionTypes.BOT)
@@ -612,7 +613,8 @@ class BotSession(Bot):
 
     class Meta:
         proxy = True
-        
+
+
 class AppSessionManager(models.Manager):
     def get_queryset(self):
         return super().get_queryset().filter(session_type=SessionTypes.APP_SESSION)

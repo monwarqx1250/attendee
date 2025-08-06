@@ -23,13 +23,12 @@ from .bots_api_utils import BotCreationSource, create_bot, create_webhook_subscr
 from .launch_bot_utils import launch_bot
 from .models import (
     ApiKey,
-    Bot,
-    SessionTypes,
     AppSession,
-    BotSession,
+    Bot,
     BotEvent,
     BotEventSubTypes,
     BotEventTypes,
+    BotSession,
     BotStates,
     ChatMessage,
     Credentials,
@@ -41,6 +40,7 @@ from .models import (
     RecordingStates,
     RecordingTranscriptionStates,
     RecordingTypes,
+    SessionTypes,
     Utterance,
     WebhookDeliveryAttempt,
     WebhookDeliveryAttemptStatus,
@@ -327,7 +327,7 @@ class ProjectBotsView(LoginRequiredMixin, ProjectUrlContextMixin, ListView):
 
     def get_queryset(self):
         project = get_project_for_user(user=self.request.user, project_object_id=self.kwargs["object_id"])
-        
+
         # Choose model based on session type
         session_type = self.get_session_type()
         if session_type == "app_sessions":

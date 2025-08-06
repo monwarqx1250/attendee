@@ -114,6 +114,7 @@ class ZoomRTMSAdapter(BotAdapter):
 
         self.upsert_chat_message_callback = upsert_chat_message_callback
         self.add_participant_event_callback = add_participant_event_callback
+
     def cleanup(self):
         logger.info("cleanup called")
         self.cleaned_up = True
