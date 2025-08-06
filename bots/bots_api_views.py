@@ -21,6 +21,7 @@ from .authentication import ApiKeyAuthentication
 from .bots_api_utils import BotCreationSource, create_app_session, create_bot, create_bot_chat_message_request, create_bot_media_request_for_image, delete_bot, patch_bot, send_sync_command
 from .launch_bot_utils import launch_bot
 from .models import (
+    AppSession,
     Bot,
     BotEventManager,
     BotEventSubTypes,
@@ -35,7 +36,6 @@ from .models import (
     MeetingTypes,
     ParticipantEvent,
     Recording,
-    SessionTypes,
     Utterance,
 )
 from .serializers import (
@@ -185,7 +185,7 @@ class AppSessionCreateView(APIView):
             400: OpenApiResponse(description="Invalid input"),
         },
         parameters=TokenHeaderParameter,
-        tags=["Bots"],
+        tags=["App Sessions"],
     )
     def post(self, request):
         app_session, error = create_app_session(data=request.data, source=BotCreationSource.API, project=request.auth.project)
@@ -593,6 +593,39 @@ class BotLeaveView(APIView):
             return Response({"error": e.messages[0]}, status=status.HTTP_400_BAD_REQUEST)
         except Bot.DoesNotExist:
             return Response({"error": "Bot not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class AppSessionEndView(APIView):
+    authentication_classes = [ApiKeyAuthentication]
+
+    @extend_schema(
+        operation_id="End App Session",
+        summary="End an app session",
+        description="Causes the app session to end.",
+        responses={
+            200: OpenApiResponse(
+                response=AppSessionSerializer,
+                description="Successfully requested to end app session",
+            ),
+            404: OpenApiResponse(description="App session not found"),
+        },
+        tags=["App Sessions"],
+    )
+    def post(self, request):
+        try:
+            rtms_stream_id = request.data.get("zoom_rtms").get("rtms_stream_id")
+            app_session = AppSession.objects.get(zoom_rtms_stream_id=rtms_stream_id, project=request.auth.project)
+
+            BotEventManager.create_event(app_session, BotEventTypes.LEAVE_REQUESTED, event_sub_type=BotEventSubTypes.LEAVE_REQUESTED_USER_REQUESTED)
+
+            send_sync_command(app_session)
+
+            return Response(AppSessionSerializer(app_session).data, status=status.HTTP_200_OK)
+        except ValidationError as e:
+            logging.error(f"Error ending app session: {str(e)} (app_session_id={app_session.object_id})")
+            return Response({"error": e.messages[0]}, status=status.HTTP_400_BAD_REQUEST)
+        except AppSession.DoesNotExist:
+            return Response({"error": "App session not found"}, status=status.HTTP_404_NOT_FOUND)
 
 
 class RecordingView(APIView):

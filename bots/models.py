@@ -582,6 +582,9 @@ class Bot(models.Model):
     def automatic_leave_settings(self):
         return self.settings.get("automatic_leave_settings", {})
 
+    def zoom_rtms(self):
+        return self.settings.get("zoom_rtms", {})
+
     class Meta:
         # We'll have to do a periodic query to find bots that have a join_at that is within 5 minutes of now.
         # The partial index will exclude bots without a join_at which should speed up the query and reduce the space used by the index.
@@ -596,9 +599,8 @@ class Bot(models.Model):
 
 
 class AppSessionManager(models.Manager):
-
     def get_queryset(self):
-        return super().get_queryset().filter(zoom_rtms_stream_id__isnull=False)
+        return super().get_queryset().filter(session_type=SessionTypes.APP_SESSION)
 
 
 class AppSession(Bot):

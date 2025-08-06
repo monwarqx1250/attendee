@@ -29,8 +29,8 @@ from .models import (
     WebhookTriggerTypes,
 )
 from .serializers import (
-    CreateBotSerializer,
     CreateAppSessionSerializer,
+    CreateBotSerializer,
     PatchBotSerializer,
 )
 from .utils import meeting_type_from_url, transcription_provider_from_bot_creation_data
@@ -235,6 +235,7 @@ def create_bot(data: dict, source: BotCreationSource, project: Project) -> tuple
         logger.error(f"Error creating bot: {e}")
         return None, {"error": str(e)}
 
+
 def create_app_session(data: dict, source: BotCreationSource, project: Project) -> tuple[Bot | None, dict | None]:
     # Given them a small grace period before we start rejecting requests
     if project.organization.out_of_credits():
@@ -282,6 +283,7 @@ def create_app_session(data: dict, source: BotCreationSource, project: Project) 
                 metadata=metadata,
                 deduplication_key=deduplication_key,
                 state=initial_state,
+                zoom_rtms_stream_id=zoom_rtms.get("rtms_stream_id"),
             )
 
             Recording.objects.create(

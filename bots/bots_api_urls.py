@@ -16,6 +16,11 @@ urlpatterns = [
         name="bot-leave",
     ),
     path(
+        "app_sessions/end",
+        bots_api_views.AppSessionEndView.as_view(),
+        name="app-session-end",
+    ),
+    path(
         "bots/<str:object_id>/transcript",
         bots_api_views.TranscriptView.as_view(),
         name="bot-transcript",
