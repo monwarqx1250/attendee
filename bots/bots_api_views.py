@@ -18,7 +18,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .authentication import ApiKeyAuthentication
-from .bots_api_utils import BotCreationSource, create_bot, create_bot_chat_message_request, create_bot_media_request_for_image, delete_bot, patch_bot, send_sync_command
+from .bots_api_utils import BotCreationSource, create_app_session, create_bot, create_bot_chat_message_request, create_bot_media_request_for_image, delete_bot, patch_bot, send_sync_command
 from .launch_bot_utils import launch_bot
 from .models import (
     Bot,
@@ -35,13 +35,16 @@ from .models import (
     MeetingTypes,
     ParticipantEvent,
     Recording,
+    SessionTypes,
     Utterance,
 )
 from .serializers import (
+    AppSessionSerializer,
     BotChatMessageRequestSerializer,
     BotImageSerializer,
     BotSerializer,
     ChatMessageSerializer,
+    CreateAppSessionSerializer,
     CreateBotSerializer,
     ParticipantEventSerializer,
     PatchBotSerializer,
@@ -100,6 +103,18 @@ NewlyCreatedBotExample = OpenApiExample(
     description="Example response when creating a new bot",
 )
 
+NewlyCreatedAppSessionExample = OpenApiExample(
+    "New app session",
+    value={
+        "id": "app_sess_weIAju4OXNZkDTpZ",
+        "zoom_rtms_stream_id": "1234567890",
+        "state": "joining",
+        "events": [{"type": "join_requested", "created_at": "2024-01-18T12:34:56Z"}],
+        "transcription_state": "not_started",
+        "recording_state": "not_started",
+    },
+)
+
 
 @extend_schema(exclude=True)
 class NotFoundView(APIView):
@@ -151,6 +166,37 @@ class BotCreateView(APIView):
             launch_bot(bot)
 
         return Response(BotSerializer(bot).data, status=status.HTTP_201_CREATED)
+
+
+class AppSessionCreateView(APIView):
+    authentication_classes = [ApiKeyAuthentication]
+
+    @extend_schema(
+        operation_id="Create App Session",
+        summary="Create a new app session",
+        description="After being created, the app session will connect to the specified media stream.",
+        request=CreateAppSessionSerializer,
+        responses={
+            201: OpenApiResponse(
+                response=AppSessionSerializer,
+                description="App session created successfully",
+                examples=[NewlyCreatedAppSessionExample],
+            ),
+            400: OpenApiResponse(description="Invalid input"),
+        },
+        parameters=TokenHeaderParameter,
+        tags=["Bots"],
+    )
+    def post(self, request):
+        app_session, error = create_app_session(data=request.data, source=BotCreationSource.API, project=request.auth.project)
+        if error:
+            return Response(error, status=status.HTTP_400_BAD_REQUEST)
+
+        # If this is a scheduled bot, we don't want to launch it yet.
+        if app_session.state == BotStates.JOINING:
+            launch_bot(app_session)
+
+        return Response(AppSessionSerializer(app_session).data, status=status.HTTP_201_CREATED)
 
 
 class SpeechView(APIView):
