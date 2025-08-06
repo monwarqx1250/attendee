@@ -108,7 +108,11 @@
                     
                     <div class="col-md-2 d-flex align-items-end filter-item">
                         <button type="submit" class="btn btn-sm btn-primary me-2">Apply</button>
+                        {% if session_type == "app_sessions" %}
+                        <a href="{% url 'bots:project-app-sessions' project.object_id %}" class="btn btn-sm btn-outline-secondary">Clear</a>
+                        {% else %}
                         <a href="{% url 'bots:project-bots' project.object_id %}" class="btn btn-sm btn-outline-secondary">Clear</a>
+                        {% endif %}
                     </div>
                 </form>
             </div>
@@ -133,7 +137,11 @@
                 <tbody>
                     {% for bot in bots %}
                     <tr class="clickable-row"
+                        {% if session_type == "app_sessions" %}
+                        hx-get="{% url 'projects:project-app-session-detail' project.object_id bot.object_id %}"
+                        {% else %}
                         hx-get="{% url 'projects:project-bot-detail' project.object_id bot.object_id %}"
+                        {% endif %}
                         hx-select="#content"
                         hx-target="#content"
                         hx-swap="outerHTML"
@@ -181,9 +189,17 @@
             <div class="alert alert-info" role="alert">
                 <i class="bi bi-info-circle me-2"></i>
                 {% if filter_params.start_date or filter_params.end_date or filter_params.states %}
-                    No bots found matching the current filters.
+                    {% if session_type == "app_sessions" %}
+                        No app sessions found matching the current filters.
+                    {% else %}
+                        No bots found matching the current filters.
+                    {% endif %}
                 {% else %}
-                    No bots found. Use the API to create bots for this project.
+                    {% if session_type == "app_sessions" %}
+                        No app sessions found. Use the API to create app sessions for this project.
+                    {% else %}
+                        No bots found. Use the API to create bots for this project.
+                    {% endif %}
                 {% endif %}
             </div>
         {% endif %}
