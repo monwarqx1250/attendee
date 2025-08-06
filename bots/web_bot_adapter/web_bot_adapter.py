@@ -11,6 +11,8 @@ import numpy as np
 import requests
 from pyvirtualdisplay import Display
 from selenium import webdriver
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.keys import Keys
 from websockets.sync.server import serve
 
 from bots.automatic_leave_configuration import AutomaticLeaveConfiguration
@@ -248,6 +250,10 @@ class WebBotAdapter(BotAdapter):
 
         self.upsert_chat_message_callback(json_data)
 
+    def handle_send_minimize_bot_video_element_keys(self):
+        actions = ActionChains(self.driver)
+        actions.key_down(Keys.CONTROL).key_down(Keys.ALT).send_keys('m').key_up(Keys.ALT).key_up(Keys.CONTROL).perform()
+
     def handle_websocket(self, websocket):
         audio_format = None
         output_dir = "frames"  # Add output directory
@@ -314,6 +320,9 @@ class WebBotAdapter(BotAdapter):
                         elif json_data.get("type") == "RecordingPermissionChange":
                             if json_data.get("change") == "granted":
                                 self.after_bot_can_record_meeting()
+
+                        elif json_data.get("type") == "sendMinimizeBotVideoElementKeys":
+                            self.handle_send_minimize_bot_video_element_keys()
 
                 elif message_type == 2:  # VIDEO
                     self.process_video_frame(message)

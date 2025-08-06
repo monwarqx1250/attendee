@@ -282,67 +282,6 @@ class StyleManager {
 
     async hideBotVideoElement() {
         const numAttempts = 10; // 1 second / 100ms = 10 attempts
-        
-        if (window.userManager.getCurrentUsersInMeeting().length > 1)
-        {
-            const deviceIdOfBot = window.userManager.currentUserId;
-            if (!deviceIdOfBot)
-            {
-                window.ws.sendJson({
-                    type: 'Error',
-                    message: 'In hideBotVideoElement, window.userManager.currentUserId was null.'
-                });
-                return;
-            }
-            const botVideoElement = document.querySelector(`[data-participant-id="${deviceIdOfBot}"]`);
-            if (!botVideoElement)
-            {
-                window.ws.sendJson({
-                    type: 'Error',
-                    message: 'In hideBotVideoElement, no bot video element found.'
-                });
-                return;
-            }
-            const botOtherOptionsButton = botVideoElement.querySelector('button[aria-label="More options"]');
-            if (!botOtherOptionsButton)
-            {
-                window.ws.sendJson({
-                    type: 'Error',
-                    message: 'In hideBotVideoElement, no bot other options button found.'
-                });
-                return;
-            }
-
-            botOtherOptionsButton.click();
-            
-            // Wait for minimize button to appear with polling
-            let botMinimizeButton = null;
-            for (let i = 0; i < numAttempts; i++) {
-                await new Promise(resolve => setTimeout(resolve, 100));
-                botMinimizeButton = document.querySelector('li[aria-label="Minimize"]');
-                if (botMinimizeButton) {
-                    break;
-                }
-                const wasLastAttempt = i === numAttempts - 1;
-                if (wasLastAttempt) {
-                    window.ws.sendJson({
-                        type: 'Error',
-                        message: 'In hideBotVideoElement, no bot minimize button found after polling.'
-                    });
-                    return;
-                }
-            }
-            
-            botMinimizeButton.click();
-        }
-        else
-        {
-            window.ws.sendJson({
-                type: 'Error',
-                message: 'In hideBotVideoElement, no other users in meeting. So unable to minimize bot video element.'
-            });
-        }
-
 
         // Wait for minimized element to appear with polling
         let botMinimizedElement = null;
@@ -363,6 +302,20 @@ class StyleManager {
         }
         
         botMinimizedElement.style.display = 'none';
+
+        // Set an interval every 2000 ms to check if the bot video element is still minimized
+        setInterval(() => {
+            if (window.userManager.getCurrentUsersInMeeting().length < 2)
+                return;
+
+            const botMinimizedElementInner = document.querySelector('div[jsname="Qiayqc"]');
+            if (botMinimizedElementInner && botMinimizedElementInner.childElementCount == 0) {
+                window.ws.sendJson({
+                    type: 'sendMinimizeBotVideoElementKeys',
+                    message: ''
+                })
+            }
+        }, 2000);
     }
 
     showAllOfGMeetUI() {
