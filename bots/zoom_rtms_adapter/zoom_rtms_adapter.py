@@ -6,6 +6,7 @@ import gi
 from bots.bot_adapter import BotAdapter
 
 gi.require_version("GLib", "2.0")
+from gi.repository import GLib
 import logging
 
 from bots.automatic_leave_configuration import AutomaticLeaveConfiguration
@@ -115,9 +116,17 @@ class ZoomRTMSAdapter(BotAdapter):
         self.upsert_chat_message_callback = upsert_chat_message_callback
         self.add_participant_event_callback = add_participant_event_callback
 
+        # Stdout IO watch
+        self.stdout_watch_id = None
+
     def cleanup(self):
         logger.info("cleanup called")
         self.cleaned_up = True
+        
+        # Remove stdout IO watch
+        if self.stdout_watch_id:
+            GLib.source_remove(self.stdout_watch_id)
+            self.stdout_watch_id = None
 
     def init(self):
         logger.info("init called")
@@ -142,11 +151,23 @@ class ZoomRTMSAdapter(BotAdapter):
         logger.info(f"Executing RTMS client with command: {' '.join(cmd)}")
 
         try:
-            # Start the subprocess with stdin pipe opened
-            process = subprocess.Popen(cmd, env=cmd_env, stdout=None, stderr=None, stdin=subprocess.PIPE, text=True)
+            # Start the subprocess with stdin and stdout pipes opened
+            process = subprocess.Popen(
+                cmd, 
+                env=cmd_env, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE, 
+                stdin=subprocess.PIPE, 
+                text=True,
+                bufsize=1,  # Line buffered
+                universal_newlines=True
+            )
 
             # You might want to store the process to interact with it later
             self.rtms_process = process
+
+            # Set up stdout monitoring
+            self.setup_stdout_monitoring()
 
             logger.info("RTMS client started successfully")
             self.send_message_callback({"message": self.Messages.APP_SESSION_CONNECTED})
@@ -154,6 +175,61 @@ class ZoomRTMSAdapter(BotAdapter):
             logger.error(f"Failed to start RTMS client: {e}")
 
         return
+
+    def setup_stdout_monitoring(self):
+        """Set up GLib IO watch to monitor stdout from the RTMS process."""
+        if not self.rtms_process or not self.rtms_process.stdout:
+            logger.warning("No stdout available to monitor")
+            return
+
+        # Get the file descriptor for stdout
+        stdout_fd = self.rtms_process.stdout.fileno()
+        
+        # Set up GLib IO watch
+        self.stdout_watch_id = GLib.io_add_watch(
+            stdout_fd,
+            GLib.IO_IN | GLib.IO_HUP,
+            self._on_stdout_data_available
+        )
+        logger.info("Set up stdout monitoring with GLib IO watch")
+
+    def _on_stdout_data_available(self, fd, condition):
+        """Callback called when stdout data is available."""
+        if condition & GLib.IO_HUP:
+            # Process has closed stdout
+            logger.info("RTMS process stdout closed")
+            return False  # Remove the watch
+        
+        if condition & GLib.IO_IN:
+            try:
+                # Read a line from stdout
+                line = self.rtms_process.stdout.readline()
+                if line:
+                    # Remove trailing newline and call the callback
+                    data = line.rstrip('\n')
+                    logger.debug(f"Read from RTMS stdout: {data}")
+                    # Handle stdout data internally
+                    self.on_stdout_data_received(data)
+                else:
+                    # EOF reached
+                    logger.info("RTMS process stdout EOF")
+                    return False  # Remove the watch
+            except Exception as e:
+                logger.error(f"Error reading stdout: {e}")
+                return False  # Remove the watch
+        
+        return True  # Continue watching
+
+    def on_stdout_data_received(self, data):
+        """
+        Handle stdout data received from the RTMS process.
+        Override this method or modify it to handle stdout data as needed.
+        
+        Args:
+            data (str): The stdout line received from the RTMS process
+        """
+        logger.info(f"RTMS stdout: {data}")
+        
 
     def send_to_rtms_stdin(self, data):
         """
@@ -194,6 +270,7 @@ class ZoomRTMSAdapter(BotAdapter):
         if self.left_meeting:
             return
         logger.info("disconnect called")
+        
         self.send_to_rtms_stdin("leave")
         logger.info("sent leave command to RTMS process")
         self.rtms_process.wait(timeout=20)
