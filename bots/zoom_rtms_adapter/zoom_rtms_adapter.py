@@ -1,5 +1,6 @@
 import json
 import subprocess
+import time
 
 import gi
 
@@ -10,6 +11,7 @@ from gi.repository import GLib
 import logging
 
 from bots.automatic_leave_configuration import AutomaticLeaveConfiguration
+from bots.models import ParticipantEventTypes
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,7 @@ class ZoomRTMSAdapter(BotAdapter):
         recording_file_path,
         automatic_leave_configuration: AutomaticLeaveConfiguration,
         upsert_chat_message_callback,
+        upsert_caption_callback,
         add_participant_event_callback,
         video_frame_size: tuple[int, int],
     ):
@@ -115,6 +118,7 @@ class ZoomRTMSAdapter(BotAdapter):
 
         self.upsert_chat_message_callback = upsert_chat_message_callback
         self.add_participant_event_callback = add_participant_event_callback
+        self.upsert_caption_callback = upsert_caption_callback
 
         # Stdout IO watch
         self.stdout_watch_id = None
@@ -229,6 +233,49 @@ class ZoomRTMSAdapter(BotAdapter):
             data (str): The stdout line received from the RTMS process
         """
         logger.info(f"RTMS stdout: {data}")
+        if data.startswith("rtmsdata."):
+            self.handle_rtms_json_message(data[9:])
+
+    def get_participant(self, participant_id):
+        return self._participant_cache.get(participant_id)
+    
+    def handle_rtms_json_message(self, json_data):
+        logger.info(f"handle_rtms_json_message called with json_data: {json_data}")
+        json_data = json.loads(json_data)
+        if json_data.get("type") == "userUpdate":
+            logger.info(f"RTMS userUpdate: {json_data}")
+            # {'op': 0, 'user': {'id': 16778240, 'name': 'Noah Duncan'}, 'type': 'userUpdate'}
+            user_id = json_data.get("user").get("id")
+            user_name = json_data.get("user").get("name")
+            
+            self._participant_cache[user_id] = {
+                "participant_uuid": user_id,
+                "participant_user_uuid": None,
+                "participant_full_name": user_name,
+                "participant_is_the_bot": False,
+            }
+
+            self.add_participant_event_callback(
+                {
+                    "participant_uuid": user_id, 
+                    "event_type": ParticipantEventTypes.JOIN if json_data.get("op") == 0 else ParticipantEventTypes.LEAVE, 
+                    "event_data": {}, 
+                    "timestamp_ms": int(time.time() * 1000)
+                }
+            )
+        elif json_data.get("type") == "transcriptUpdate":
+            logger.info(f"RTMS transcriptUpdate: {json_data}")
+            # {'user': {'userId': 16778240, 'name': 'Noah Duncan'}, 'text': 'Hello, how are you?', 'type': 'transcriptUpdate'}
+            
+            itemConverted = {
+                "deviceId": json_data.get("user").get("userId"),
+                "captionId": json_data.get("id"),
+                "text": json_data.get("text"),
+                "isFinal": True
+            };
+
+            self.upsert_caption_callback(itemConverted)
+    
         
 
     def send_to_rtms_stdin(self, data):

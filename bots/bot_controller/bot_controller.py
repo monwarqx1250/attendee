@@ -224,6 +224,7 @@ class BotController:
             use_video=self.pipeline_configuration.record_video or self.pipeline_configuration.rtmp_stream_video,
             send_message_callback=self.on_message_from_adapter,
             add_audio_chunk_callback=add_audio_chunk_callback,
+            upsert_caption_callback=self.closed_caption_manager.upsert_caption,
             zoom_client_id=zoom_oauth_credentials["client_id"],
             zoom_client_secret=zoom_oauth_credentials["client_secret"],
             zoom_rtms=self.bot_in_db.zoom_rtms(),
@@ -1467,6 +1468,7 @@ class BotController:
 
         if message.get("message") == BotAdapter.Messages.APP_SESSION_DISCONNECTED:
             logger.info("Received message that app session disconnected")
+            self.flush_utterances()
             BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.APP_SESSION_DISCONNECTED)
             self.cleanup()
             return
