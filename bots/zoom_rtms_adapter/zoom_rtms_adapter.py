@@ -123,6 +123,8 @@ class ZoomRTMSAdapter(BotAdapter):
         # Stdout IO watch
         self.stdout_watch_id = None
 
+        self.first_buffer_timestamp_ms = None
+
     def cleanup(self):
         logger.info("cleanup called")
         self.cleaned_up = True
@@ -275,6 +277,9 @@ class ZoomRTMSAdapter(BotAdapter):
             };
 
             self.upsert_caption_callback(itemConverted)
+        
+        elif json_data.get("type") == "firstVideoFrameReceived":
+            self.first_buffer_timestamp_ms = time.time() * 1000
     
         
 
@@ -329,8 +334,8 @@ class ZoomRTMSAdapter(BotAdapter):
     def leave(self):
         return self.disconnect()
 
-    def get_first_buffer_timestamp_ms_offset(self):
-        return 0
+    def get_first_buffer_timestamp_ms(self):
+        return self.first_buffer_timestamp_ms
 
     def check_auto_leave_conditions(self):
         return
