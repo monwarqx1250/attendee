@@ -627,6 +627,53 @@ class AppSessionEndView(APIView):
         except AppSession.DoesNotExist:
             return Response({"error": "App session not found"}, status=status.HTTP_404_NOT_FOUND)
 
+class AppSessionMediaView(APIView):
+    authentication_classes = [ApiKeyAuthentication]
+
+    @extend_schema(
+        operation_id="Get App Session Media",
+        summary="Get the media for an app session",
+        description="Returns a short-lived S3 URL for the media of the app session.",
+        responses={
+            200: OpenApiResponse(
+                response=RecordingSerializer,
+                description="Short-lived S3 URL for the recording",
+            )
+        },
+        parameters=[
+            *TokenHeaderParameter,
+            OpenApiParameter(
+                name="object_id",
+                type=str,
+                location=OpenApiParameter.PATH,
+                description="App Session ID",
+                examples=[OpenApiExample("App Session ID Example", value="app_session_xxxxxxxxxxx")],
+            ),
+        ],
+        tags=["App Sessions"],
+    )
+    def get(self, request, object_id):
+        try:
+            app_session = AppSession.objects.get(object_id=object_id, project=request.auth.project)
+
+            recording = Recording.objects.filter(bot=app_session, is_default_recording=True).first()
+            if not recording:
+                return Response(
+                    {"error": "No media found for app session"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            recording_file = recording.file
+            if not recording_file:
+                return Response(
+                    {"error": "No media file found for app session"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            return Response(RecordingSerializer(recording).data)
+
+        except AppSession.DoesNotExist:
+            return Response({"error": "App session not found"}, status=status.HTTP_404_NOT_FOUND)
 
 class RecordingView(APIView):
     authentication_classes = [ApiKeyAuthentication]

@@ -21,6 +21,11 @@ urlpatterns = [
         name="app-session-end",
     ),
     path(
+        "app_sessions/<str:object_id>/media",
+        bots_api_views.AppSessionMediaView.as_view(),
+        name="app-session-media",
+    ),
+    path(
         "bots/<str:object_id>/transcript",
         bots_api_views.TranscriptView.as_view(),
         name="bot-transcript",
