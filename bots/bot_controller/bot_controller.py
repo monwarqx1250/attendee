@@ -750,6 +750,16 @@ class BotController:
         if self.bot_in_db.state == BotStates.STAGED:
             logger.info(f"take_action_based_on_bot_in_db - STAGED. For now, this is a no-op. join_at = {self.bot_in_db.join_at.isoformat()}")
 
+        # App session states
+        if self.bot_in_db.state == BotStates.CONNECTING:
+            logger.info("take_action_based_on_bot_in_db - CONNECTING")
+            BotEventManager.set_requested_bot_action_taken_at(self.bot_in_db)
+            self.adapter.init()
+        if self.bot_in_db.state == BotStates.DISCONNECTING:
+            logger.info("take_action_based_on_bot_in_db - DISCONNECTING")
+            BotEventManager.set_requested_bot_action_taken_at(self.bot_in_db)
+            self.adapter.disconnect()
+
     def join_if_staged_and_time_to_join(self):
         if self.bot_in_db.state != BotStates.STAGED:
             return
@@ -1447,6 +1457,18 @@ class BotController:
                 bot=self.bot_in_db,
                 event_type=BotEventTypes.BOT_RECORDING_PERMISSION_GRANTED,
             )
+            return
+
+        # App session messages
+        if message.get("message") == BotAdapter.Messages.APP_SESSION_CONNECTED:
+            logger.info("Received message that app session connected")
+            BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.APP_SESSION_CONNECTED)
+            return
+
+        if message.get("message") == BotAdapter.Messages.APP_SESSION_DISCONNECTED:
+            logger.info("Received message that app session disconnected")
+            BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.APP_SESSION_DISCONNECTED)
+            self.cleanup()
             return
 
         raise Exception(f"Received unexpected message from bot adapter: {message}")

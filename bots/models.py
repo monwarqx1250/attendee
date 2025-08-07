@@ -223,6 +223,11 @@ class BotStates(models.IntegerChoices):
     STAGED = 12, "Staged"
     JOINED_RECORDING_PAUSED = 13, "Joined - Recording Paused"
 
+    # App session states
+    CONNECTING = 100, "Connecting"
+    CONNECTED = 101, "Connected"
+    DISCONNECTING = 102, "Disconnecting"
+
     @classmethod
     def state_to_api_code(cls, value):
         """Returns the API code for a given state value"""
@@ -240,6 +245,9 @@ class BotStates(models.IntegerChoices):
             cls.SCHEDULED: "scheduled",
             cls.STAGED: "staged",
             cls.JOINED_RECORDING_PAUSED: "joined_recording_paused",
+            cls.CONNECTING: "connecting",
+            cls.CONNECTED: "connected",
+            cls.DISCONNECTING: "disconnecting",
         }
         return mapping.get(value)
 
@@ -736,6 +744,13 @@ class BotEventTypes(models.IntegerChoices):
     RECORDING_PAUSED = 13, "Recording Paused"
     RECORDING_RESUMED = 14, "Recording Resumed"
 
+    # App session events
+    APP_SESSION_CONNECTION_REQUESTED = 100, "App Session Connection Requested"
+    APP_SESSION_CONNECTED = 101, "App Session Connected"
+    APP_SESSION_DISCONNECT_REQUESTED = 102, "App Session Disconnect Requested"
+    APP_SESSION_DISCONNECTED = 103, "App Session Disconnected"
+
+
     @classmethod
     def type_to_api_code(cls, value):
         """Returns the API code for a given type value"""
@@ -754,6 +769,10 @@ class BotEventTypes(models.IntegerChoices):
             cls.STAGED: "staged",
             cls.RECORDING_PAUSED: "recording_paused",
             cls.RECORDING_RESUMED: "recording_resumed",
+            cls.APP_SESSION_CONNECTION_REQUESTED: "app_session_connection_requested",
+            cls.APP_SESSION_CONNECTED: "app_session_connected",
+            cls.APP_SESSION_DISCONNECT_REQUESTED: "app_session_disconnect_requested",
+            cls.APP_SESSION_DISCONNECTED: "app_session_disconnected",
         }
         return mapping.get(value)
 
@@ -925,6 +944,9 @@ class BotEventManager:
                 BotStates.POST_PROCESSING,
                 BotStates.STAGED,
                 BotStates.SCHEDULED,
+                BotStates.CONNECTING,
+                BotStates.DISCONNECTING,
+                BotStates.CONNECTED,
             ],
             "to": BotStates.FATAL_ERROR,
         },
@@ -981,6 +1003,23 @@ class BotEventManager:
             "from": BotStates.JOINED_RECORDING_PAUSED,
             "to": BotStates.JOINED_RECORDING,
         },
+        # App session events
+        BotEventTypes.APP_SESSION_CONNECTION_REQUESTED: {
+            "from": BotStates.READY,
+            "to": BotStates.CONNECTING,
+        },
+        BotEventTypes.APP_SESSION_CONNECTED: {
+            "from": BotStates.CONNECTING,
+            "to": BotStates.CONNECTED,
+        },
+        BotEventTypes.APP_SESSION_DISCONNECT_REQUESTED: {
+            "from": [BotStates.CONNECTED, BotStates.CONNECTING],
+            "to": BotStates.DISCONNECTING,
+        },
+        BotEventTypes.APP_SESSION_DISCONNECTED: {
+            "from": BotStates.DISCONNECTING,
+            "to": BotStates.POST_PROCESSING,
+        },
     }
 
     @classmethod
@@ -992,6 +1031,8 @@ class BotEventManager:
         event_type = {
             BotStates.JOINING: BotEventTypes.JOIN_REQUESTED,
             BotStates.LEAVING: BotEventTypes.LEAVE_REQUESTED,
+            BotStates.CONNECTING: BotEventTypes.APP_SESSION_CONNECTION_REQUESTED,
+            BotStates.DISCONNECTING: BotEventTypes.APP_SESSION_DISCONNECT_REQUESTED,
         }.get(bot.state)
 
         if event_type is None:
@@ -1054,6 +1095,11 @@ class BotEventManager:
             raise ValidationError(f"Expected exactly one pending recording for bot {bot.object_id} in state {BotStates.state_to_api_code(new_state)}, but found {pending_recordings.count()}")
         pending_recording = pending_recordings.first()
         RecordingManager.set_recording_in_progress(pending_recording)
+
+    @classmethod
+    def after_new_state_is_connected(cls, bot: Bot, new_state: BotStates):
+        # It's the same thing as if we moved to joined recording
+        cls.after_new_state_is_joined_recording(bot, new_state)
 
     @classmethod
     def after_new_state_is_joined_recording_paused(cls, bot: Bot, new_state: BotStates):
@@ -1171,6 +1217,8 @@ class BotEventManager:
                     # If we moved to the recording state
                     if new_state == BotStates.JOINED_RECORDING:
                         cls.after_new_state_is_joined_recording(bot=bot, new_state=new_state)
+                    if new_state == BotStates.CONNECTED:
+                        cls.after_new_state_is_connected(bot=bot, new_state=new_state)
 
                     if new_state == BotStates.JOINED_RECORDING_PAUSED:
                         cls.after_new_state_is_joined_recording_paused(bot=bot, new_state=new_state)

@@ -301,7 +301,7 @@ def create_app_session(data: dict, source: BotCreationSource, project: Project) 
             if webhook_subscriptions:
                 create_webhook_subscriptions(webhook_subscriptions, project, app_session)
 
-            BotEventManager.create_event(bot=app_session, event_type=BotEventTypes.JOIN_REQUESTED, event_metadata={"source": source})
+            BotEventManager.create_event(bot=app_session, event_type=BotEventTypes.APP_SESSION_CONNECTION_REQUESTED, event_metadata={"source": source})
 
             return app_session, None
 

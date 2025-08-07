@@ -149,8 +149,7 @@ class ZoomRTMSAdapter(BotAdapter):
             self.rtms_process = process
 
             logger.info("RTMS client started successfully")
-            self.send_message_callback({"message": self.Messages.BOT_JOINED_MEETING})
-            self.send_message_callback({"message": self.Messages.BOT_RECORDING_PERMISSION_GRANTED})
+            self.send_message_callback({"message": self.Messages.APP_SESSION_CONNECTED})
         except Exception as e:
             logger.error(f"Failed to start RTMS client: {e}")
 
@@ -191,17 +190,20 @@ class ZoomRTMSAdapter(BotAdapter):
     def send_raw_audio(self, bytes, sample_rate):
         return
 
-    def leave(self):
+    def disconnect(self):
         if self.left_meeting:
             return
-        logger.info("leave called")
+        logger.info("disconnect called")
         self.send_to_rtms_stdin("leave")
         logger.info("sent leave command to RTMS process")
         self.rtms_process.wait(timeout=20)
         logger.info("RTMS process exited")
         self.left_meeting = True
-        self.send_message_callback({"message": self.Messages.MEETING_ENDED})
+        self.send_message_callback({"message": self.Messages.APP_SESSION_DISCONNECTED})
         return
+
+    def leave(self):
+        return self.disconnect()
 
     def get_first_buffer_timestamp_ms_offset(self):
         return 0

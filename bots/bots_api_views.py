@@ -193,7 +193,7 @@ class AppSessionCreateView(APIView):
             return Response(error, status=status.HTTP_400_BAD_REQUEST)
 
         # If this is a scheduled bot, we don't want to launch it yet.
-        if app_session.state == BotStates.JOINING:
+        if app_session.state == BotStates.CONNECTING:
             launch_bot(app_session)
 
         return Response(AppSessionSerializer(app_session).data, status=status.HTTP_201_CREATED)
@@ -616,7 +616,7 @@ class AppSessionEndView(APIView):
             rtms_stream_id = request.data.get("zoom_rtms").get("rtms_stream_id")
             app_session = AppSession.objects.get(zoom_rtms_stream_id=rtms_stream_id, project=request.auth.project)
 
-            BotEventManager.create_event(app_session, BotEventTypes.LEAVE_REQUESTED, event_sub_type=BotEventSubTypes.LEAVE_REQUESTED_USER_REQUESTED)
+            BotEventManager.create_event(app_session, BotEventTypes.APP_SESSION_DISCONNECT_REQUESTED)
 
             send_sync_command(app_session)
 
