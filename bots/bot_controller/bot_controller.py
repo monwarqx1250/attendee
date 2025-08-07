@@ -339,10 +339,22 @@ class BotController:
         else:
             raise Exception("No rtmp client found")
 
-    def upload_recording_to_external_media_storage_if_enabled(self):
-        if not self.bot_in_db.external_media_storage_bucket_name():
-            return
+    def upload_recording_to_hosted_storage(self):
+        logger.info("Telling file uploader to upload recording file...")
+        file_uploader = FileUploader(
+            bucket=os.environ.get("AWS_RECORDING_STORAGE_BUCKET_NAME"),
+            key=self.get_recording_filename(),
+            endpoint_url=os.environ.get("AWS_ENDPOINT_URL"),
+        )
+        file_uploader.upload_file(self.get_recording_file_location())
+        file_uploader.wait_for_upload()
+        logger.info("File uploader finished uploading file")
 
+        file_uploader.delete_file(self.get_recording_file_location())
+        logger.info("File uploader deleted file from local filesystem")
+        self.recording_file_saved(file_uploader.key)
+
+    def upload_recording_to_external_media_storage(self):
         external_media_storage_credentials_record = self.bot_in_db.project.credentials.filter(credential_type=Credentials.CredentialTypes.EXTERNAL_MEDIA_STORAGE).first()
         if not external_media_storage_credentials_record:
             logger.error(f"No external media storage credentials found for bot {self.bot_in_db.id}")
@@ -357,7 +369,7 @@ class BotController:
             logger.info(f"Uploading recording to external media storage bucket {self.bot_in_db.external_media_storage_bucket_name()}")
             file_uploader = FileUploader(
                 bucket=self.bot_in_db.external_media_storage_bucket_name(),
-                key=self.bot_in_db.external_media_storage_recording_file_name() or self.get_recording_filename(),
+                key=self.get_recording_filename(),
                 endpoint_url=external_media_storage_credentials.get("endpoint_url"),
                 region_name=external_media_storage_credentials.get("region_name"),
                 access_key_id=external_media_storage_credentials.get("access_key_id"),
@@ -366,6 +378,11 @@ class BotController:
             file_uploader.upload_file(self.get_recording_file_location())
             file_uploader.wait_for_upload()
             logger.info(f"File uploader finished uploading file to external media storage bucket {self.bot_in_db.external_media_storage_bucket_name()}")
+
+            file_uploader.delete_file(self.get_recording_file_location())
+            logger.info("File uploader deleted file from local filesystem")
+            self.recording_file_saved(file_uploader.key)
+
         except Exception as e:
             logger.exception(f"Error uploading recording to external media storage bucket {self.bot_in_db.external_media_storage_bucket_name()}: {e}")
 
@@ -421,20 +438,10 @@ class BotController:
             self.websocket_audio_client.cleanup()
 
         if self.get_recording_file_location():
-            self.upload_recording_to_external_media_storage_if_enabled()
-
-            logger.info("Telling file uploader to upload recording file...")
-            file_uploader = FileUploader(
-                bucket=os.environ.get("AWS_RECORDING_STORAGE_BUCKET_NAME"),
-                key=self.get_recording_filename(),
-                endpoint_url=os.environ.get("AWS_ENDPOINT_URL"),
-            )
-            file_uploader.upload_file(self.get_recording_file_location())
-            file_uploader.wait_for_upload()
-            logger.info("File uploader finished uploading file")
-            file_uploader.delete_file(self.get_recording_file_location())
-            logger.info("File uploader deleted file from local filesystem")
-            self.recording_file_saved(file_uploader.key)
+            if self.bot_in_db.upload_media_to_external_storage():
+                self.upload_recording_to_external_media_storage()
+            else:
+                self.upload_recording_to_hosted_storage()
 
         if self.bot_in_db.create_debug_recording():
             self.save_debug_recording()

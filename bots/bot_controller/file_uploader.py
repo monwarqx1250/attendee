@@ -16,7 +16,13 @@ class FileUploader:
             bucket (str): The name of the S3 bucket to upload to
             key (str): The name of the to be stored file
         """
-        self.s3_client = boto3.client("s3", endpoint_url=endpoint_url, region_name=region_name, aws_access_key_id=access_key_id, aws_secret_access_key=access_key_secret)
+        self.s3_client = boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            region_name=region_name,
+            aws_access_key_id=access_key_id,
+            aws_secret_access_key=access_key_secret,
+        )
         self.bucket = bucket
         self.key = key
         self._upload_thread = None

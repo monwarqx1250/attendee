@@ -6,6 +6,7 @@ import random
 import secrets
 import string
 
+import boto3
 from concurrency.exceptions import RecordModifiedError
 from concurrency.fields import IntegerVersionField
 from cryptography.fernet import Fernet, InvalidToken
@@ -455,11 +456,8 @@ class Bot(models.Model):
             external_media_storage_settings = {}
         return external_media_storage_settings.get("bucket_name", None)
 
-    def external_media_storage_recording_file_name(self):
-        external_media_storage_settings = self.settings.get("external_media_storage_settings", {})
-        if external_media_storage_settings is None:
-            external_media_storage_settings = {}
-        return external_media_storage_settings.get("recording_file_name", None)
+    def upload_media_to_external_storage(self):
+        return self.external_media_storage_bucket_name() is not None
 
     def last_bot_event(self):
         return self.bot_events.order_by("-created_at").first()
@@ -1256,6 +1254,36 @@ class Recording(models.Model):
 
     @property
     def url(self):
+        if self.bot.upload_media_to_external_storage():
+            return self.url_via_external_storage()
+        else:
+            return self.url_via_hosted_storage()
+
+    # Uses the project's external media storage credentials
+    def url_via_external_storage(self):
+        external_storage_credentials = self.bot.project.credentials.filter(credential_type=Credentials.CredentialTypes.EXTERNAL_MEDIA_STORAGE).first()
+        if not external_storage_credentials:
+            return None
+        external_storage_credentials = external_storage_credentials.get_credentials()
+        if not external_storage_credentials:
+            return None
+
+        external_storage_s3_client = boto3.client(
+            "s3",
+            endpoint_url=external_storage_credentials.get("endpoint_url"),
+            region_name=external_storage_credentials.get("region_name"),
+            aws_access_key_id=external_storage_credentials.get("access_key_id"),
+            aws_secret_access_key=external_storage_credentials.get("access_key_secret"),
+        )
+
+        return external_storage_s3_client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bot.external_media_storage_bucket_name(), "Key": self.file.name},
+            ExpiresIn=1800,
+        )
+
+    # Uses the global storage credentials
+    def url_via_hosted_storage(self):
         if not self.file.name:
             return None
         # Generate a temporary signed URL that expires in 30 minutes (1800 seconds)

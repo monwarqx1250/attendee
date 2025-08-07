@@ -516,10 +516,6 @@ class CallbackSettingsJSONField(serializers.JSONField):
                 "type": "string",
                 "description": "The name of the external storage bucket to use for media files",
             },
-            "recording_file_name": {
-                "type": "string",
-                "description": "Optional custom name for the recording file",
-            },
         },
         "required": ["bucket_name"],
         "additionalProperties": False,
@@ -634,9 +630,6 @@ class CreateBotSerializer(serializers.Serializer):
         "type": "object",
         "properties": {
             "bucket_name": {
-                "type": "string",
-            },
-            "recording_file_name": {
                 "type": "string",
             },
         },
