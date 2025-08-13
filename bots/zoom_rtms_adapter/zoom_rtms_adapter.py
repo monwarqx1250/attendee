@@ -1,6 +1,9 @@
 import json
 import subprocess
 import time
+import threading
+import re
+from pathlib import Path
 
 import gi
 
@@ -14,6 +17,15 @@ from bots.automatic_leave_configuration import AutomaticLeaveConfiguration
 from bots.models import ParticipantEventTypes
 
 logger = logging.getLogger(__name__)
+
+# Regex patterns for chunk files (same as simulate_rtms_stream.py)
+VIDEO_RE = re.compile(r"video-(\d+)\.raw$")
+AUDIO_RE = re.compile(r"audio-(\d+)\.raw$")
+
+# Audio constants (same as simulate_rtms_stream.py)
+AUDIO_RATE = 16000
+AUDIO_CHANNELS = 1
+AUDIO_BYTES_PER_SAMPLE = 2  # s16le
 
 
 class ZoomRTMSAdapter(BotAdapter):
@@ -125,9 +137,22 @@ class ZoomRTMSAdapter(BotAdapter):
 
         self.first_buffer_timestamp_ms = None
 
+        self.rtms_process = None
+
+        # Simulation variables
+        self.simulation_running = False
+        self.simulation_threads = []
+        self.simulation_start_time_ns = None
+
     def cleanup(self):
         logger.info("cleanup called")
         self.cleaned_up = True
+        
+        # Stop simulation
+        self.simulation_running = False
+        for thread in self.simulation_threads:
+            if thread.is_alive():
+                thread.join(timeout=1.0)
         
         # Remove stdout IO watch
         if self.stdout_watch_id:
@@ -140,11 +165,149 @@ class ZoomRTMSAdapter(BotAdapter):
 
         return
 
+    def discover_chunks(self, indir: Path):
+        """Discover video and audio chunk files in the directory"""
+        vids, auds = [], []
+        if not indir.is_dir():
+            logger.warning(f"Simulation directory not found: {indir}")
+            return vids, auds
+            
+        for p in indir.iterdir():
+            m = VIDEO_RE.match(p.name)
+            if m:
+                ts = int(m.group(1))
+                vids.append((ts, p))
+                continue
+            m = AUDIO_RE.match(p.name)
+            if m:
+                ts = int(m.group(1))
+                auds.append((ts, p))
+        vids.sort(key=lambda x: x[0])
+        auds.sort(key=lambda x: x[0])
+        return vids, auds
+
+    def simulate_video_stream(self, video_chunks, pace=1.0):
+        """Simulate video streaming by reading chunk files and calling the video callback"""
+        logger.info(f"Starting video simulation with {len(video_chunks)} chunks")
+        
+        for idx, (ts_ms, path) in enumerate(video_chunks):
+            if not self.simulation_running:
+                break
+                
+            try:
+                with path.open("rb") as f:
+                    data = f.read()
+                
+                # Calculate timing for pacing
+                if pace > 0 and self.simulation_start_time_ns:
+                    pts_ns = ts_ms * 1_000_000  # ms to ns
+                    target_wall_ns = self.simulation_start_time_ns + int(pts_ns * (1.0 / pace))
+                    
+                    while self.simulation_running:
+                        now_ns = time.monotonic_ns()
+                        if now_ns >= target_wall_ns:
+                            break
+                        time.sleep(0.001)
+                        print(f"Waiting for video chunk {idx+1}/{len(video_chunks)} (ts={ts_ms}ms, size={len(data)} bytes)")
+                
+                if not self.simulation_running:
+                    break
+                    
+                # Send video frame via callback
+                if self.add_video_frame_callback and self.wants_any_video_frames_callback():
+                    current_time_ns = time.time_ns()
+                    print(f"Sending video chunk {idx+1}/{len(video_chunks)} (ts={ts_ms}ms, size={len(data)} bytes)")
+                    self.add_video_frame_callback(data, current_time_ns)
+                    
+                print(f"Sent video chunk {idx+1}/{len(video_chunks)} (ts={ts_ms}ms, size={len(data)} bytes)")
+                
+            except Exception as e:
+                logger.error(f"Error processing video chunk {path}: {e}")
+                
+        logger.info("Video simulation completed")
+
+    def simulate_audio_stream(self, audio_chunks, pace=1.0):
+        """Simulate audio streaming by reading chunk files and calling the audio callback"""
+        logger.info(f"Starting audio simulation with {len(audio_chunks)} chunks")
+        
+        for idx, (ts_ms, path) in enumerate(audio_chunks):
+            if not self.simulation_running:
+                break
+                
+            try:
+                with path.open("rb") as f:
+                    data = f.read()
+                
+                # Calculate timing for pacing
+                if pace > 0 and self.simulation_start_time_ns:
+                    pts_ns = ts_ms * 1_000_000  # ms to ns
+                    target_wall_ns = self.simulation_start_time_ns + int(pts_ns * (1.0 / pace))
+                    
+                    while self.simulation_running:
+                        now_ns = time.monotonic_ns()
+                        if now_ns >= target_wall_ns:
+                            break
+                        time.sleep(0.001)
+                
+                if not self.simulation_running:
+                    break
+                    
+                # Send audio chunk via callback
+                if self.add_mixed_audio_chunk_callback:
+                    self.add_mixed_audio_chunk_callback(data)
+                    
+                logger.debug(f"Sent audio chunk {idx+1}/{len(audio_chunks)} (ts={ts_ms}ms, size={len(data)} bytes)")
+                
+            except Exception as e:
+                logger.error(f"Error processing audio chunk {path}: {e}")
+                
+        logger.info("Audio simulation completed")
+
+    def start_simulation(self, simulation_dir, pace=1.0):
+        """Start the RTMS simulation using chunk files"""
+        simulation_path = Path(simulation_dir)
+        if not simulation_path.is_dir():
+            logger.error(f"Simulation directory not found: {simulation_path}")
+            return
+            
+        video_chunks, audio_chunks = self.discover_chunks(simulation_path)
+        
+        if not video_chunks and not audio_chunks:
+            logger.warning("No simulation chunks found")
+            return
+            
+        logger.info(f"Found {len(video_chunks)} video chunks and {len(audio_chunks)} audio chunks")
+        
+        self.simulation_running = True
+        self.simulation_start_time_ns = time.monotonic_ns()
+        
+        # Start video simulation thread
+        if video_chunks and self.use_video:
+            video_thread = threading.Thread(
+                target=self.simulate_video_stream,
+                args=(video_chunks, pace),
+                daemon=True,
+                name="rtms-video-sim"
+            )
+            video_thread.start()
+            self.simulation_threads.append(video_thread)
+            
+        # Start audio simulation thread  
+        if audio_chunks and self.use_mixed_audio:
+            audio_thread = threading.Thread(
+                target=self.simulate_audio_stream,
+                args=(audio_chunks, pace),
+                daemon=True,
+                name="rtms-audio-sim"
+            )
+            audio_thread.start()
+            self.simulation_threads.append(audio_thread)
+
     def initialize_rtms_connection(self):
         logger.info("Initializing RTMS connection...")
 
         # Define recording file path - you may want to customize this
-        recording_file_path = self.recording_file_path
+        recording_file_path = self.recording_file_path + ".temp"
 
         # Construct the command
         cmd_env = {
@@ -177,6 +340,15 @@ class ZoomRTMSAdapter(BotAdapter):
 
             logger.info("RTMS client started successfully")
             self.send_message_callback({"message": self.Messages.APP_SESSION_CONNECTED})
+            
+            # Start simulation (temporary code for testing)
+            simulation_dir = "temp_rtms_output_gold"  # Assume chunks are in a directory
+            if Path(simulation_dir).is_dir():
+                logger.info(f"Starting RTMS simulation from {simulation_dir}")
+                self.start_simulation(simulation_dir, pace=1.0)
+            else:
+                logger.info(f"No simulation directory found at {simulation_dir}, skipping simulation")
+                
         except Exception as e:
             logger.error(f"Failed to start RTMS client: {e}")
 
@@ -346,3 +518,6 @@ class ZoomRTMSAdapter(BotAdapter):
     def send_video(self, video_url):
         logger.info(f"send_video called with video_url = {video_url}. This is not supported for zoom")
         return
+
+    def get_first_buffer_timestamp_ms_offset(self):
+        return 0
