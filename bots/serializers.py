@@ -537,6 +537,27 @@ class CallbackSettingsJSONField(serializers.JSONField):
     pass
 
 
+
+@extend_schema_field(
+    {
+        "type": "object",
+        "properties": {
+            "bucket_name": {
+                "type": "string",
+                "description": "The name of the external storage bucket to use for media files.",
+            },
+            "recording_file_name": {
+                "type": "string",
+                "description": "Optional custom name for the recording file",
+            },
+        },
+        "required": ["bucket_name"],
+        "additionalProperties": False,
+    }
+)
+class ExternalMediaStorageSettingsJSONField(serializers.JSONField):
+    pass
+
 class CreateSessionMixin(serializers.Serializer):
     deduplication_key = serializers.CharField(help_text="Optional key for deduplicating bots. If a bot with this key already exists in a non-terminal state, the new bot will not be created and an error will be returned.", required=False, default=None)
 
@@ -1090,27 +1111,6 @@ class CreateSessionMixin(serializers.Serializer):
 
         return data
 
-
-
-@extend_schema_field(
-    {
-        "type": "object",
-        "properties": {
-            "bucket_name": {
-                "type": "string",
-                "description": "The name of the external storage bucket to use for media files.",
-            },
-            "recording_file_name": {
-                "type": "string",
-                "description": "Optional custom name for the recording file",
-            },
-        },
-        "required": ["bucket_name"],
-        "additionalProperties": False,
-    }
-)
-class ExternalMediaStorageSettingsJSONField(serializers.JSONField):
-    pass
 
 
 @extend_schema_serializer(
