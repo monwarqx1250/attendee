@@ -1139,6 +1139,24 @@ components:
           additionalProperties: false
           description: Callback urls for the bot to call when it needs to fetch certain
             data.
+        external_media_storage_settings:
+          type: object
+          properties:
+            bucket_name:
+              type: string
+              description: The name of the external storage bucket to use for media
+                files.
+            recording_file_name:
+              type: string
+              description: Optional custom name for the recording file
+          required:
+          - bucket_name
+          additionalProperties: false
+          description: Settings that allow Attendee to upload the recording to an
+            external storage bucket controlled by you. This relieves you from needing
+            to download the recording from Attendee and then upload it to your own
+            storage. To use this feature you must add credentials to your project
+            that provide access to the external storage.
         transcription_settings:
           type: object
           properties:

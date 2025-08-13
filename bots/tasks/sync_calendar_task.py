@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime, timedelta
 from datetime import timezone as python_timezone
 from typing import Dict, List, Optional
@@ -10,10 +11,23 @@ from django.utils import timezone
 
 from bots.bots_api_utils import delete_bot, patch_bot
 from bots.models import Bot, BotStates, Calendar, CalendarEvent, CalendarPlatform, CalendarStates, WebhookTriggerTypes
+from bots.utils import meeting_type_from_url
 from bots.webhook_payloads import calendar_webhook_payload
 from bots.webhook_utils import trigger_webhook
 
 logger = logging.getLogger(__name__)
+
+
+def extract_meeting_url_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+
+    # Split text by space, newlines, quotes, and angle brackets
+    words = re.split(r'[\s\n"\'<>]+', text)
+    for word in words:
+        if word and meeting_type_from_url(word):
+            return word
+    return None
 
 
 def sync_bot_with_calendar_event(bot: Bot, calendar_event: CalendarEvent):
@@ -125,8 +139,8 @@ class CalendarSyncHandler:
             # Try to get existing event
             local_event = CalendarEvent.objects.get(calendar=self.calendar, platform_uuid=platform_uuid)
 
-            # Check if raw data has changed
-            if local_event.raw == event_data["raw"]:
+            # Check if raw data has changed or meeting url has changed due to changed extraction logic
+            if local_event.raw == event_data["raw"] and local_event.meeting_url == event_data["meeting_url"]:
                 return local_event, False, False
 
             # Update the existing event
@@ -400,6 +414,15 @@ class GoogleCalendarSyncHandler(CalendarSyncHandler):
         else:
             raise ValueError(f"Invalid event datetime format: {event_datetime}")
 
+    def _truncate_large_text_fields_in_gcal_event(self, google_event: dict) -> dict:
+        """Truncate large text fields in a Google Calendar event. Return a copy of the event with the fields truncated."""
+        event_copy = google_event.copy()
+        if event_copy.get("description"):
+            event_copy["description"] = event_copy.get("description")[:8000]
+        if event_copy.get("summary"):
+            event_copy["summary"] = event_copy.get("summary")[:8000]
+        return event_copy
+
     def _remote_event_to_calendar_event_data(self, google_event: dict) -> dict:
         """Convert Google Calendar event data to CalendarEvent field data."""
         start_time = self._parse_event_datetime(google_event["start"])
@@ -413,6 +436,7 @@ class GoogleCalendarSyncHandler(CalendarSyncHandler):
                 if entry_point.get("entryPointType") == "video":
                     meeting_url = entry_point.get("uri")
                     break
+        meeting_url = meeting_url or extract_meeting_url_from_text(google_event.get("description")) or extract_meeting_url_from_text(google_event.get("summary"))
 
         # Extract attendees
         attendees = []
@@ -431,7 +455,7 @@ class GoogleCalendarSyncHandler(CalendarSyncHandler):
             "start_time": start_time,
             "end_time": end_time,
             "attendees": attendees,
-            "raw": google_event,
+            "raw": self._truncate_large_text_fields_in_gcal_event(google_event),
             "is_deleted": google_event.get("status") == "cancelled",
             "ical_uid": google_event.get("iCalUID"),
         }
@@ -450,7 +474,7 @@ class MicrosoftCalendarSyncHandler(CalendarSyncHandler):
 
     TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
     GRAPH_BASE = "https://graph.microsoft.com/v1.0"
-    CALENDAR_EVENT_SELECT_FIELDS = "id,subject,start,end,attendees,organizer,iCalUId,isCancelled,isOnlineMeeting,onlineMeetingProvider,onlineMeeting,onlineMeetingUrl,location,bodyPreview,webLink"
+    CALENDAR_EVENT_SELECT_FIELDS = "id,subject,start,end,attendees,organizer,iCalUId,isCancelled,isOnlineMeeting,onlineMeetingProvider,onlineMeeting,onlineMeetingUrl,location,body,webLink"
 
     def _raise_if_error_is_authentication_error(self, e: requests.RequestException):
         if e.response.json().get("error") == "invalid_grant":
@@ -647,7 +671,23 @@ class MicrosoftCalendarSyncHandler(CalendarSyncHandler):
         legacy = ev.get("onlineMeetingUrl")
         if legacy:
             return legacy
+
+        # Try to extract a meeting url from the subject
+        url_from_subject = extract_meeting_url_from_text(ev.get("subject", ""))
+        if url_from_subject:
+            return url_from_subject
+        # Try to extract a meeting url from the body
+        url_from_body = extract_meeting_url_from_text(ev.get("body", {}).get("content", ""))
+        if url_from_body:
+            return url_from_body
         return None
+
+    def _truncate_large_text_fields_in_ms_event(self, ms_event: dict) -> dict:
+        """Truncate large text fields in a Microsoft Graph event. Return a copy of the event with the fields truncated."""
+        event_copy = ms_event.copy()
+        if event_copy.get("body") and event_copy.get("body").get("content"):
+            event_copy["body"]["content"] = event_copy.get("body").get("content")[:8000]
+        return event_copy
 
     def _remote_event_to_calendar_event_data(self, ms_event: dict) -> dict:
         """Convert Microsoft Graph event into our CalendarEvent fields."""
@@ -676,7 +716,7 @@ class MicrosoftCalendarSyncHandler(CalendarSyncHandler):
             "start_time": start_time,
             "end_time": end_time,
             "attendees": attendees_out,
-            "raw": ms_event,
+            "raw": self._truncate_large_text_fields_in_ms_event(ms_event),
             "is_deleted": bool(ms_event.get("isCancelled")),
             "ical_uid": ms_event.get("iCalUId"),
         }

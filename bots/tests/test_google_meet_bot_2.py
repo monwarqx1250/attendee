@@ -1246,3 +1246,118 @@ class TestGoogleMeetBot2(TransactionTestCase):
 
         # Close the database connection since we're in a thread
         connection.close()
+
+    @patch("bots.models.Bot.create_debug_recording", return_value=False)
+    @patch("bots.web_bot_adapter.web_bot_adapter.Display")
+    @patch("bots.web_bot_adapter.web_bot_adapter.webdriver.Chrome")
+    @patch("bots.bot_controller.bot_controller.FileUploader")
+    @patch("bots.google_meet_bot_adapter.google_meet_ui_methods.GoogleMeetUIMethods.check_if_meeting_is_found", return_value=None)
+    @patch("bots.google_meet_bot_adapter.google_meet_ui_methods.GoogleMeetUIMethods.wait_for_host_if_needed", return_value=None)
+    def test_bot_uploads_to_external_storage_when_credentials_available(
+        self,
+        mock_wait_for_host_if_needed,
+        mock_check_if_meeting_is_found,
+        MockFileUploader,
+        MockChromeDriver,
+        MockDisplay,
+        mock_create_debug_recording,
+    ):
+        # Configure external media storage settings on the bot
+        self.bot.settings = {
+            "external_media_storage_settings": {
+                "bucket_name": "my-external-bucket",
+                "recording_file_name": "custom-recording-name.mp4",
+            }
+        }
+        self.bot.save()
+
+        # Create external media storage credentials
+        external_credentials = Credentials.objects.create(project=self.project, credential_type=Credentials.CredentialTypes.EXTERNAL_MEDIA_STORAGE)
+        external_credentials.set_credentials({"access_key_id": "test_access_key", "access_key_secret": "test_secret_key", "endpoint_url": "https://s3.amazonaws.com", "region_name": "us-east-1"})
+
+        # Configure the mock uploader for both regular and external storage
+        mock_uploader = create_mock_file_uploader()
+        MockFileUploader.return_value = mock_uploader
+
+        # Mock the Chrome driver
+        mock_driver = create_mock_google_meet_driver()
+        MockChromeDriver.return_value = mock_driver
+
+        # Mock virtual display
+        mock_display = MagicMock()
+        MockDisplay.return_value = mock_display
+
+        # Create bot controller
+        controller = BotController(self.bot.id)
+
+        # Run the bot in a separate thread since it has an event loop
+        bot_thread = threading.Thread(target=controller.run)
+        bot_thread.daemon = True
+        bot_thread.start()
+
+        def simulate_join_flow():
+            # Sleep to allow initialization
+            time.sleep(2)
+
+            # Add participants to keep the bot in the meeting
+            controller.adapter.participants_info["user1"] = {"deviceId": "user1", "fullName": "Test User", "active": True, "isCurrentUser": False}
+
+            # Let the bot run for a bit to "record"
+            time.sleep(3)
+
+            # Trigger auto-leave
+            controller.adapter.only_one_participant_in_meeting_at = time.time() - 10000000000
+            time.sleep(4)
+
+            # Clean up connections in thread
+            connection.close()
+
+        # Run join flow simulation after a short delay
+        threading.Timer(2, simulate_join_flow).start()
+
+        # Give the bot some time to process
+        bot_thread.join(timeout=10)
+
+        # Refresh the bot from the database
+        self.bot.refresh_from_db()
+
+        # Assert that the bot is in the ENDED state
+        self.assertEqual(self.bot.state, BotStates.ENDED)
+
+        # Verify that the recording was finished
+        self.recording.refresh_from_db()
+        self.assertEqual(self.recording.state, RecordingStates.COMPLETE)
+
+        # Verify file uploader was called multiple times - once for external storage and once for regular storage
+        # The external storage upload happens first, then the regular upload
+        self.assertEqual(mock_uploader.upload_file.call_count, 2, "FileUploader.upload_file should be called twice - once for external storage and once for regular storage")
+        self.assertEqual(mock_uploader.wait_for_upload.call_count, 2, "FileUploader.wait_for_upload should be called twice")
+
+        # Verify FileUploader was instantiated twice with different parameters
+        self.assertEqual(MockFileUploader.call_count, 2, "FileUploader should be instantiated twice")
+
+        # Check the first call (external storage)
+        external_call_args = MockFileUploader.call_args_list[0]
+        external_call_kwargs = external_call_args.kwargs
+        self.assertEqual(external_call_kwargs["bucket"], "my-external-bucket")
+        self.assertEqual(external_call_kwargs["key"], "custom-recording-name.mp4")
+        self.assertEqual(external_call_kwargs["endpoint_url"], "https://s3.amazonaws.com")
+        self.assertEqual(external_call_kwargs["region_name"], "us-east-1")
+        self.assertEqual(external_call_kwargs["access_key_id"], "test_access_key")
+        self.assertEqual(external_call_kwargs["access_key_secret"], "test_secret_key")
+
+        # Check the second call (regular storage) - should use environment variables
+        regular_call_args = MockFileUploader.call_args_list[1]
+        regular_call_kwargs = regular_call_args.kwargs
+        self.assertEqual(regular_call_kwargs["bucket"], "test-bucket")  # From environment variable set in setUpClass
+        self.assertIsNotNone(regular_call_kwargs["key"])  # Should have some recording filename
+
+        # Verify only one delete_file call (for the regular storage uploader)
+        mock_uploader.delete_file.assert_called_once()
+
+        # Cleanup
+        controller.cleanup()
+        bot_thread.join(timeout=5)
+
+        # Close the database connection since we're in a thread
+        connection.close()

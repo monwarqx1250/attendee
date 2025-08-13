@@ -128,6 +128,17 @@ def initialize_bot_creation_data_from_calendar_event(data, project):
 
     return calendar_event, None
 
+def validate_external_media_storage_settings(external_media_storage_settings, project):
+    if not external_media_storage_settings:
+        return None
+
+    if not project.credentials.filter(credential_type=Credentials.CredentialTypes.EXTERNAL_MEDIA_STORAGE).exists():
+        relative_url = reverse("bots:project-credentials", kwargs={"object_id": project.object_id})
+        settings_url = f"https://{os.getenv('SITE_DOMAIN', 'app.attendee.dev')}{relative_url}"
+        return {"error": f"External media storage credentials are required to upload recordings to an external storage bucket. Please add external media storage credentials at {settings_url}."}
+
+    return None
+
 
 class BotCreationSource(str, Enum):
     API = "api"
@@ -173,7 +184,12 @@ def create_bot(data: dict, source: BotCreationSource, project: Project) -> tuple
     deduplication_key = serializer.validated_data["deduplication_key"]
     webhook_subscriptions = serializer.validated_data["webhooks"]
     callback_settings = serializer.validated_data["callback_settings"]
+    external_media_storage_settings = serializer.validated_data["external_media_storage_settings"]
     initial_state = BotStates.SCHEDULED if join_at else BotStates.READY
+
+    error = validate_external_media_storage_settings(external_media_storage_settings, project)
+    if error:
+        return None, error
 
     settings = {
         "transcription_settings": transcription_settings,
@@ -185,6 +201,7 @@ def create_bot(data: dict, source: BotCreationSource, project: Project) -> tuple
         "zoom_settings": zoom_settings,
         "websocket_settings": websocket_settings,
         "callback_settings": callback_settings,
+        "external_media_storage_settings": external_media_storage_settings,
     }
 
     try:
