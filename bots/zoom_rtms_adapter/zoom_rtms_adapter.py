@@ -142,17 +142,6 @@ class ZoomRTMSAdapter(BotAdapter):
         self.stop_pipe_reading = False
         self.pipe_reading_lock = threading.Lock()
 
-    def _ensure_fifo(self, path: str):
-        """
-        Ensure a named pipe exists at `path`. If a non-FIFO exists there, raise.
-        """
-        if os.path.exists(path):
-            st = os.stat(path)
-            if not stat.S_ISFIFO(st.st_mode):
-                raise RuntimeError(f"Path exists and is not a FIFO: {path}")
-            return
-        os.mkfifo(path, 0o666)
-
     def _read_exact(self, f, n: int) -> bytes | None:
         """Read exactly n bytes from file-like f (blocking). Return None on EOF."""
         buf = bytearray()
@@ -163,9 +152,9 @@ class ZoomRTMSAdapter(BotAdapter):
             buf += chunk
         return bytes(buf)
 
-    def _read_frames_from_fd(self, fd: int, on_frame):
+    def _read_audio_frames_from_fd(self, fd: int, on_frame):
         """
-        Blocking loop: read [int32LE length][payload] frames from fd and call on_frame(bytes).
+        Blocking loop: read [int32LE length][payload] audio frames from fd and call on_frame(bytes).
         """
         try:
             # buffering=0 gives us unbuffered reads so length boundaries behave nicely
@@ -186,10 +175,60 @@ class ZoomRTMSAdapter(BotAdapter):
                     try:
                         on_frame(data)
                     except Exception:
-                        logger.exception("Error in frame callback")
+                        logger.exception("Error in audio frame callback")
         except Exception:
             # Normal during shutdown if we close fds
-            logger.exception("Pipe reader exiting")
+            logger.exception("Audio pipe reader exiting")
+
+    def _read_video_frames_from_fd(self, fd: int, on_frame):
+        """
+        Blocking loop: read [int32LE username_length][username][int32LE data_length][payload] video frames from fd and call on_frame(bytes, username).
+        """
+        try:
+            # buffering=0 gives us unbuffered reads so length boundaries behave nicely
+            with os.fdopen(fd, "rb", buffering=0) as f:
+                while True:
+                    with self.pipe_reading_lock:
+                        if self.stop_pipe_reading:
+                            break
+                    
+                    # Video format: username_length + username + data_length + data
+                    username_length_header = self._read_exact(f, 4)
+                    if username_length_header is None:
+                        break
+                    (username_length,) = struct.unpack("<i", username_length_header)
+                    
+                    if username_length < 0:
+                        continue
+                        
+                    username_bytes = b""
+                    if username_length > 0:
+                        username_bytes = self._read_exact(f, username_length)
+                        if username_bytes is None:
+                            break
+                    
+                    username = username_bytes.decode('utf-8', errors='replace')
+                    
+                    # Now read the video data length and data
+                    data_length_header = self._read_exact(f, 4)
+                    if data_length_header is None:
+                        break
+                    (data_length,) = struct.unpack("<i", data_length_header)
+                    
+                    if data_length <= 0:
+                        continue
+                        
+                    data = self._read_exact(f, data_length)
+                    if data is None:
+                        break
+                    
+                    try:
+                        on_frame(data, username)
+                    except Exception:
+                        logger.exception("Error in video frame callback")
+        except Exception:
+            # Normal during shutdown if we close fds
+            logger.exception("Video pipe reader exiting")
 
     def _on_audio_frame(self, frame: bytes):
         """
@@ -209,19 +248,19 @@ class ZoomRTMSAdapter(BotAdapter):
         except Exception:
             logger.exception("Audio frame handling failed")
 
-    def _on_video_frame(self, frame: bytes):
+    def _on_video_frame(self, frame: bytes, userName: str):
         """
-        Called for each H.264 frame.
+        Called for each H.264 frame with username.
         """
         try:
-            # If you don’t currently need video frames, still drain the pipe
+            # If you don't currently need video frames, still drain the pipe
             # but skip invoking the callback to save downstream work.
             if self.wants_any_video_frames_callback and not self.wants_any_video_frames_callback():
                 return
             if self.add_video_frame_callback:
                 # Many pipelines just accept the encoded bytes; if yours needs metadata,
                 # pass it here (e.g., codec, width/height).
-                self.add_video_frame_callback(frame, time.time_ns())
+                self.add_video_frame_callback(frame, time.time_ns(), userName)
         except Exception:
             logger.exception("Video frame handling failed")
 
@@ -229,7 +268,7 @@ class ZoomRTMSAdapter(BotAdapter):
         """Kick off reader threads for any open read-ends."""
         if self.audio_rfd is not None and (self.audio_pipe_thread is None or not self.audio_pipe_thread.is_alive()):
             self.audio_pipe_thread = threading.Thread(
-                target=self._read_frames_from_fd,
+                target=self._read_audio_frames_from_fd,
                 args=(self.audio_rfd, self._on_audio_frame),
                 daemon=True,
             )
@@ -238,7 +277,7 @@ class ZoomRTMSAdapter(BotAdapter):
 
         if self.video_rfd is not None and (self.video_pipe_thread is None or not self.video_pipe_thread.is_alive()):
             self.video_pipe_thread = threading.Thread(
-                target=self._read_frames_from_fd,
+                target=self._read_video_frames_from_fd,
                 args=(self.video_rfd, self._on_video_frame),
                 daemon=True,
             )

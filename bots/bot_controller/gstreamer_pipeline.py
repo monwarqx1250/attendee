@@ -58,6 +58,32 @@ class GstreamerPipeline:
         self.queue_drops = {}
         self.last_reported_drops = {}
 
+        self.overlay_text = ""
+        self.overlay_enabled = True
+
+    def update_overlay_text(self, text: str | None):
+        """Update the on-screen text (e.g., speaker name). Use '' or None to hide."""
+
+        if (text or "") == self.overlay_text:
+            return
+
+        self.overlay_text = text or ""
+        if not self.pipeline or not self.overlay_enabled:
+            return
+
+        overlay = self.pipeline.get_by_name("overlay")
+        if not overlay:
+            return
+
+        # Apply on the GLib main loop thread to avoid cross-thread issues
+        def _apply():
+            try:
+                overlay.set_property("text", self.overlay_text)
+            except Exception as e:
+                logger.info(f"Failed to set overlay text: {e}")
+            return False  # don't repeat
+        GLib.idle_add(_apply)
+
     def on_new_sample_from_appsink(self, sink):
         """Handle new samples from the appsink"""
         sample = sink.emit("pull-sample")
@@ -109,20 +135,27 @@ class GstreamerPipeline:
             )
         else:
             if self.video_format == self.VIDEO_FORMAT_H264:
-                # For H.264 input, we don't need encoding - just parse and mux
+                # H.264 input → parse → decode → overlay → re-encode
                 video_pipeline_str = (
                     "appsrc name=video_source do-timestamp=false stream-type=0 format=time ! "
                     "queue name=q1 max-size-buffers=1000 max-size-bytes=100000000 max-size-time=0 ! "
-                    "h264parse config-interval=-1 ! "
-                    "video/x-h264,stream-format=avc,alignment=au ! "
+                    "h264parse ! avdec_h264 ! "
+                    "videoconvert ! "
+                    "textoverlay name=overlay halignment=left valignment=bottom xpad=24 ypad=24 "
+                    "font-desc=\"Sans, 28\" ! "
+                    "videorate ! "
+                    "queue name=q2 max-size-buffers=5000 max-size-bytes=500000000 max-size-time=0 ! "
+                    "x264enc tune=zerolatency speed-preset=ultrafast ! "
                     "queue name=q3 max-size-buffers=1000 max-size-bytes=100000000 max-size-time=0 ! "
                 )
             else:
-                # For raw video (I420), we need encoding
+                # Raw input (e.g., I420) → overlay → encode
                 video_pipeline_str = (
                     "appsrc name=video_source do-timestamp=false stream-type=0 format=time ! "
                     "queue name=q1 max-size-buffers=1000 max-size-bytes=100000000 max-size-time=0 ! "
                     "videoconvert ! "
+                    "textoverlay name=overlay halignment=left valignment=bottom xpad=24 ypad=24 "
+                    "font-desc=\"Sans, 28\" ! "
                     "videorate ! "
                     "queue name=q2 max-size-buffers=5000 max-size-bytes=500000000 max-size-time=0 ! "
                     "x264enc tune=zerolatency speed-preset=ultrafast ! "
@@ -139,6 +172,13 @@ class GstreamerPipeline:
             )
 
         self.pipeline = Gst.parse_launch(pipeline_str)
+
+        overlay = self.pipeline.get_by_name("overlay")
+        if overlay and self.overlay_enabled:
+            try:
+                overlay.set_property("text", self.overlay_text or "")
+            except Exception as e:
+                logger.info(f"Unable to init overlay text: {e}")
 
         if self.output_format != self.OUTPUT_FORMAT_MP3:
             # Get both appsrc elements
@@ -276,7 +316,7 @@ class GstreamerPipeline:
 
         return True
 
-    def on_new_video_frame(self, frame, current_time_ns):
+    def on_new_video_frame(self, frame, current_time_ns, overlay_text):
         try:
             # Initialize start time if not set
             if self.start_time_ns is None:
@@ -299,6 +339,8 @@ class GstreamerPipeline:
 
         except Exception as e:
             logger.info(f"Error processing video frame: {e}")
+
+        self.update_overlay_text(overlay_text)
 
     def cleanup(self):
         logger.info("Shutting down GStreamer pipeline...")
