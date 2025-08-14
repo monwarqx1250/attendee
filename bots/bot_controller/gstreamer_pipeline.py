@@ -134,33 +134,27 @@ class GstreamerPipeline:
                 f"{sink_string}"               # … → sink
             )
         else:
+            # Common pipeline components
+            video_source = "appsrc name=video_source do-timestamp=false stream-type=0 format=time ! "
+            queue1 = "queue name=q1 max-size-buffers=1000 max-size-bytes=100000000 max-size-time=0 ! "
+            overlay_and_encode = (
+                "videoconvert ! "
+                "textoverlay name=overlay halignment=left valignment=bottom xpad=10 ypad=10 "
+                "font-desc=\"Sans, 10\" draw-shadow=false draw-outline=false ! "
+                "videorate ! "
+                "queue name=q2 max-size-buffers=5000 max-size-bytes=500000000 max-size-time=0 ! "
+                "x264enc tune=zerolatency speed-preset=ultrafast ! "
+                "queue name=q3 max-size-buffers=1000 max-size-bytes=100000000 max-size-time=0 ! "
+            )
+            
             if self.video_format == self.VIDEO_FORMAT_H264:
                 # H.264 input → parse → decode → overlay → re-encode
-                video_pipeline_str = (
-                    "appsrc name=video_source do-timestamp=false stream-type=0 format=time ! "
-                    "queue name=q1 max-size-buffers=1000 max-size-bytes=100000000 max-size-time=0 ! "
-                    "h264parse ! avdec_h264 ! "
-                    "videoconvert ! "
-                    "textoverlay name=overlay halignment=left valignment=bottom xpad=24 ypad=24 "
-                    "font-desc=\"Sans, 28\" ! "
-                    "videorate ! "
-                    "queue name=q2 max-size-buffers=5000 max-size-bytes=500000000 max-size-time=0 ! "
-                    "x264enc tune=zerolatency speed-preset=ultrafast ! "
-                    "queue name=q3 max-size-buffers=1000 max-size-bytes=100000000 max-size-time=0 ! "
-                )
+                decode_section = "h264parse ! avdec_h264 ! "
             else:
                 # Raw input (e.g., I420) → overlay → encode
-                video_pipeline_str = (
-                    "appsrc name=video_source do-timestamp=false stream-type=0 format=time ! "
-                    "queue name=q1 max-size-buffers=1000 max-size-bytes=100000000 max-size-time=0 ! "
-                    "videoconvert ! "
-                    "textoverlay name=overlay halignment=left valignment=bottom xpad=24 ypad=24 "
-                    "font-desc=\"Sans, 28\" ! "
-                    "videorate ! "
-                    "queue name=q2 max-size-buffers=5000 max-size-bytes=500000000 max-size-time=0 ! "
-                    "x264enc tune=zerolatency speed-preset=ultrafast ! "
-                    "queue name=q3 max-size-buffers=1000 max-size-bytes=100000000 max-size-time=0 ! "
-                )
+                decode_section = ""
+            
+            video_pipeline_str = video_source + queue1 + decode_section + overlay_and_encode
 
             pipeline_str = (
                 f"{video_pipeline_str}"
