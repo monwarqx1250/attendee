@@ -130,9 +130,11 @@ class ZoomRTMSAdapter(BotAdapter):
 
         self.rtms_process = None
 
-        # Set up named pipes for video and audio
-        self.video_pipe_path = "/tmp/video_pipe"
-        self.audio_pipe_path = "/tmp/audio_pipe"
+        # Anonymous pipe FDs (parent reads, child writes)
+        self.audio_rfd = None
+        self.audio_wfd = None
+        self.video_rfd = None
+        self.video_wfd = None
 
         # Pipe reading threads and control
         self.audio_pipe_thread = None
@@ -152,50 +154,42 @@ class ZoomRTMSAdapter(BotAdapter):
         os.mkfifo(path, 0o666)
 
     def _read_exact(self, f, n: int) -> bytes | None:
-        """Read exactly n bytes or return None on EOF."""
+        """Read exactly n bytes from file-like f (blocking). Return None on EOF."""
         buf = bytearray()
         while len(buf) < n:
-            try:
-                chunk = f.read(n - len(buf))
-            except InterruptedError:
-                continue
+            chunk = f.read(n - len(buf))
             if not chunk:
-                # EOF
                 return None
             buf += chunk
         return bytes(buf)
 
-    def _read_frames_from_pipe(self, path: str, on_frame):
+    def _read_frames_from_fd(self, fd: int, on_frame):
         """
-        Blocking loop: open FIFO, read [len][payload] until EOF/stop.
-        `on_frame(frame_bytes)` is invoked for each payload.
+        Blocking loop: read [int32LE length][payload] frames from fd and call on_frame(bytes).
         """
-        # Block until writer (Node) opens the FIFO
         try:
-            with open(path, "rb", buffering=0) as f:
+            # buffering=0 gives us unbuffered reads so length boundaries behave nicely
+            with os.fdopen(fd, "rb", buffering=0) as f:
                 while True:
                     with self.pipe_reading_lock:
                         if self.stop_pipe_reading:
                             break
-                    # 4-byte little-endian size prefix
                     header = self._read_exact(f, 4)
                     if header is None:
                         break
                     (size,) = struct.unpack("<i", header)
                     if size <= 0:
-                        # Ignore weird/empty frames
                         continue
-                    frame = self._read_exact(f, size)
-                    if frame is None:
+                    data = self._read_exact(f, size)
+                    if data is None:
                         break
                     try:
-                        on_frame(frame)
+                        on_frame(data)
                     except Exception:
                         logger.exception("Error in frame callback")
-        except FileNotFoundError:
-            logger.warning(f"FIFO {path} not found (writer not started yet?)")
         except Exception:
-            logger.exception(f"Error reading from FIFO {path}")
+            # Normal during shutdown if we close fds
+            logger.exception("Pipe reader exiting")
 
     def _on_audio_frame(self, frame: bytes):
         """
@@ -231,56 +225,43 @@ class ZoomRTMSAdapter(BotAdapter):
         except Exception:
             logger.exception("Video frame handling failed")
 
-    def _start_pipe_readers(self):
-        """Start background threads that read frames from FIFOs."""
-        # Create FIFOs only for streams we will actually use.
-        need_audio = self.use_one_way_audio or self.use_mixed_audio
-        need_video = self.use_video
-
-        try:
-            if need_audio:
-                self._ensure_fifo(self.audio_pipe_path)
-            if need_video:
-                self._ensure_fifo(self.video_pipe_path)
-        except Exception:
-            logger.exception("Failed to create FIFOs")
-            return
-
-        # Launch reader threads; they will block until Node opens the pipes for writing.
-        if need_audio and (self.audio_pipe_thread is None or not self.audio_pipe_thread.is_alive()):
+    def _start_fd_readers(self):
+        """Kick off reader threads for any open read-ends."""
+        if self.audio_rfd is not None and (self.audio_pipe_thread is None or not self.audio_pipe_thread.is_alive()):
             self.audio_pipe_thread = threading.Thread(
-                target=self._read_frames_from_pipe,
-                args=(self.audio_pipe_path, self._on_audio_frame),
+                target=self._read_frames_from_fd,
+                args=(self.audio_rfd, self._on_audio_frame),
                 daemon=True,
             )
             self.audio_pipe_thread.start()
-            logger.info(f"Audio FIFO reader started: {self.audio_pipe_path}")
+            logger.info(f"Audio pipe reader started (fd={self.audio_rfd})")
 
-        if need_video and (self.video_pipe_thread is None or not self.video_pipe_thread.is_alive()):
+        if self.video_rfd is not None and (self.video_pipe_thread is None or not self.video_pipe_thread.is_alive()):
             self.video_pipe_thread = threading.Thread(
-                target=self._read_frames_from_pipe,
-                args=(self.video_pipe_path, self._on_video_frame),
+                target=self._read_frames_from_fd,
+                args=(self.video_rfd, self._on_video_frame),
                 daemon=True,
             )
             self.video_pipe_thread.start()
-            logger.info(f"Video FIFO reader started: {self.video_pipe_path}")
+            logger.info(f"Video pipe reader started (fd={self.video_rfd})")
 
-    def _stop_pipe_readers(self, unlink_pipes: bool = False):
-        """Signal threads to stop and optionally remove FIFOs."""
+    def _stop_fd_readers(self):
+        """Signal threads to stop; they’ll also exit when the child closes the write ends."""
         with self.pipe_reading_lock:
             self.stop_pipe_reading = True
-
         for t in (self.audio_pipe_thread, self.video_pipe_thread):
             if t and t.is_alive():
                 t.join(timeout=2.0)
 
-        if unlink_pipes:
-            for p in (self.audio_pipe_path, self.video_pipe_path):
+        # Close our read ends explicitly (optional; threads should have exited on EOF)
+        for fd_attr in ("audio_rfd", "video_rfd"):
+            fd = getattr(self, fd_attr, None)
+            if fd is not None:
                 try:
-                    if p and os.path.exists(p) and stat.S_ISFIFO(os.stat(p).st_mode):
-                        os.unlink(p)
-                except Exception:
-                    logger.exception(f"Failed to unlink FIFO {p}")
+                    os.close(fd)
+                except OSError:
+                    pass
+                setattr(self, fd_attr, None)
 
     def cleanup(self):
         logger.info("cleanup called")
@@ -291,7 +272,7 @@ class ZoomRTMSAdapter(BotAdapter):
             GLib.source_remove(self.stdout_watch_id)
             self.stdout_watch_id = None
 
-        self._stop_pipe_readers(unlink_pipes=True)
+        self._stop_fd_readers()
 
     def init(self):
         logger.info("init called")
@@ -314,18 +295,20 @@ class ZoomRTMSAdapter(BotAdapter):
         need_audio = self.use_one_way_audio or self.use_mixed_audio
         need_video = self.use_video
 
-        # Create FIFOs before launching Node so it can open them immediately
+        pass_fds = []
+
+        # Create anonymous pipes: parent reads rfd, child writes wfd
         if need_audio:
-            self._ensure_fifo(self.audio_pipe_path)
+            self.audio_rfd, self.audio_wfd = os.pipe()
+            cmd_env["AUDIO_FD"] = str(self.audio_wfd)
+            pass_fds.append(self.audio_wfd)
+
         if need_video:
-            self._ensure_fifo(self.video_pipe_path)
+            self.video_rfd, self.video_wfd = os.pipe()
+            cmd_env["VIDEO_FD"] = str(self.video_wfd)
+            pass_fds.append(self.video_wfd)
 
         cmd = ["node", "/home/nduncan/Documents/attendee_stuff/rtms-developer-preview-js/index.js", "--", f"--recording_file_path={recording_file_path}", f"--join_payload={json.dumps(self.zoom_rtms)}"]
-
-        if need_video:
-            cmd.append(f"--video_pipe_path={self.video_pipe_path}")
-        if need_audio:
-            cmd.append(f"--audio_pipe_path={self.audio_pipe_path}")
 
         logger.info(f"Executing RTMS client with command: {' '.join(cmd)}")
 
@@ -339,18 +322,27 @@ class ZoomRTMSAdapter(BotAdapter):
                 stdin=subprocess.PIPE, 
                 text=True,
                 bufsize=1,  # Line buffered
-                universal_newlines=True
+                universal_newlines=True,
+                pass_fds=pass_fds,
             )
 
             # You might want to store the process to interact with it later
             self.rtms_process = process
 
+            # Close the child's write-ends in the parent; we only keep the read-ends
+            if self.audio_wfd is not None:
+                os.close(self.audio_wfd)
+                self.audio_wfd = None
+            if self.video_wfd is not None:
+                os.close(self.video_wfd)
+                self.video_wfd = None
+
+
             # Set up stdout monitoring
             self.setup_stdout_monitoring()
 
-
             # Start pipe readers right away; they will block until Node opens pipes
-            self._start_pipe_readers()
+            self._start_fd_readers()
 
             logger.info("RTMS client started successfully")
             self.send_message_callback({"message": self.Messages.APP_SESSION_CONNECTED})
