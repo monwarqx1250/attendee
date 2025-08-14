@@ -1,10 +1,11 @@
 import json
 import subprocess
 import time
+import os
+import struct
 import threading
-import re
-from pathlib import Path
-
+import errno
+import stat
 import gi
 
 from bots.bot_adapter import BotAdapter
@@ -17,16 +18,6 @@ from bots.automatic_leave_configuration import AutomaticLeaveConfiguration
 from bots.models import ParticipantEventTypes
 
 logger = logging.getLogger(__name__)
-
-# Regex patterns for chunk files (same as simulate_rtms_stream.py)
-VIDEO_RE = re.compile(r"video-(\d+)\.raw$")
-AUDIO_RE = re.compile(r"audio-(\d+)\.raw$")
-
-# Audio constants (same as simulate_rtms_stream.py)
-AUDIO_RATE = 16000
-AUDIO_CHANNELS = 1
-AUDIO_BYTES_PER_SAMPLE = 2  # s16le
-
 
 class ZoomRTMSAdapter(BotAdapter):
     def __init__(
@@ -139,169 +130,174 @@ class ZoomRTMSAdapter(BotAdapter):
 
         self.rtms_process = None
 
-        # Simulation variables
-        self.simulation_running = False
-        self.simulation_threads = []
-        self.simulation_start_time_ns = None
+        # Set up named pipes for video and audio
+        self.video_pipe_path = "/tmp/video_pipe"
+        self.audio_pipe_path = "/tmp/audio_pipe"
+
+        # Pipe reading threads and control
+        self.audio_pipe_thread = None
+        self.video_pipe_thread = None
+        self.stop_pipe_reading = False
+        self.pipe_reading_lock = threading.Lock()
+
+    def _ensure_fifo(self, path: str):
+        """
+        Ensure a named pipe exists at `path`. If a non-FIFO exists there, raise.
+        """
+        if os.path.exists(path):
+            st = os.stat(path)
+            if not stat.S_ISFIFO(st.st_mode):
+                raise RuntimeError(f"Path exists and is not a FIFO: {path}")
+            return
+        os.mkfifo(path, 0o666)
+
+    def _read_exact(self, f, n: int) -> bytes | None:
+        """Read exactly n bytes or return None on EOF."""
+        buf = bytearray()
+        while len(buf) < n:
+            try:
+                chunk = f.read(n - len(buf))
+            except InterruptedError:
+                continue
+            if not chunk:
+                # EOF
+                return None
+            buf += chunk
+        return bytes(buf)
+
+    def _read_frames_from_pipe(self, path: str, on_frame):
+        """
+        Blocking loop: open FIFO, read [len][payload] until EOF/stop.
+        `on_frame(frame_bytes)` is invoked for each payload.
+        """
+        # Block until writer (Node) opens the FIFO
+        try:
+            with open(path, "rb", buffering=0) as f:
+                while True:
+                    with self.pipe_reading_lock:
+                        if self.stop_pipe_reading:
+                            break
+                    # 4-byte little-endian size prefix
+                    header = self._read_exact(f, 4)
+                    if header is None:
+                        break
+                    (size,) = struct.unpack("<i", header)
+                    if size <= 0:
+                        # Ignore weird/empty frames
+                        continue
+                    frame = self._read_exact(f, size)
+                    if frame is None:
+                        break
+                    try:
+                        on_frame(frame)
+                    except Exception:
+                        logger.exception("Error in frame callback")
+        except FileNotFoundError:
+            logger.warning(f"FIFO {path} not found (writer not started yet?)")
+        except Exception:
+            logger.exception(f"Error reading from FIFO {path}")
+
+    def _on_audio_frame(self, frame: bytes):
+        """
+        Called for each Opus audio frame (mixed, 16kHz mono).
+        """
+        self.last_audio_received_at = time.time()
+        try:
+            # Prefer mixed-audio callback when available.
+            if self.use_mixed_audio and self.add_mixed_audio_chunk_callback:
+                # Signature assumed: (bytes, sample_rate_hz)
+                self.add_mixed_audio_chunk_callback(frame)
+            elif self.add_audio_chunk_callback:
+                self.add_audio_chunk_callback(frame, 16000)
+            else:
+                # No consumer; frame is implicitly dropped.
+                pass
+        except Exception:
+            logger.exception("Audio frame handling failed")
+
+    def _on_video_frame(self, frame: bytes):
+        """
+        Called for each H.264 frame.
+        """
+        try:
+            # If you don’t currently need video frames, still drain the pipe
+            # but skip invoking the callback to save downstream work.
+            if self.wants_any_video_frames_callback and not self.wants_any_video_frames_callback():
+                return
+            if self.add_video_frame_callback:
+                # Many pipelines just accept the encoded bytes; if yours needs metadata,
+                # pass it here (e.g., codec, width/height).
+                self.add_video_frame_callback(frame, time.time_ns())
+        except Exception:
+            logger.exception("Video frame handling failed")
+
+    def _start_pipe_readers(self):
+        """Start background threads that read frames from FIFOs."""
+        # Create FIFOs only for streams we will actually use.
+        need_audio = self.use_one_way_audio or self.use_mixed_audio
+        need_video = self.use_video
+
+        try:
+            if need_audio:
+                self._ensure_fifo(self.audio_pipe_path)
+            if need_video:
+                self._ensure_fifo(self.video_pipe_path)
+        except Exception:
+            logger.exception("Failed to create FIFOs")
+            return
+
+        # Launch reader threads; they will block until Node opens the pipes for writing.
+        if need_audio and (self.audio_pipe_thread is None or not self.audio_pipe_thread.is_alive()):
+            self.audio_pipe_thread = threading.Thread(
+                target=self._read_frames_from_pipe,
+                args=(self.audio_pipe_path, self._on_audio_frame),
+                daemon=True,
+            )
+            self.audio_pipe_thread.start()
+            logger.info(f"Audio FIFO reader started: {self.audio_pipe_path}")
+
+        if need_video and (self.video_pipe_thread is None or not self.video_pipe_thread.is_alive()):
+            self.video_pipe_thread = threading.Thread(
+                target=self._read_frames_from_pipe,
+                args=(self.video_pipe_path, self._on_video_frame),
+                daemon=True,
+            )
+            self.video_pipe_thread.start()
+            logger.info(f"Video FIFO reader started: {self.video_pipe_path}")
+
+    def _stop_pipe_readers(self, unlink_pipes: bool = False):
+        """Signal threads to stop and optionally remove FIFOs."""
+        with self.pipe_reading_lock:
+            self.stop_pipe_reading = True
+
+        for t in (self.audio_pipe_thread, self.video_pipe_thread):
+            if t and t.is_alive():
+                t.join(timeout=2.0)
+
+        if unlink_pipes:
+            for p in (self.audio_pipe_path, self.video_pipe_path):
+                try:
+                    if p and os.path.exists(p) and stat.S_ISFIFO(os.stat(p).st_mode):
+                        os.unlink(p)
+                except Exception:
+                    logger.exception(f"Failed to unlink FIFO {p}")
 
     def cleanup(self):
         logger.info("cleanup called")
         self.cleaned_up = True
-        
-        # Stop simulation
-        self.simulation_running = False
-        for thread in self.simulation_threads:
-            if thread.is_alive():
-                thread.join(timeout=1.0)
-        
+                
         # Remove stdout IO watch
         if self.stdout_watch_id:
             GLib.source_remove(self.stdout_watch_id)
             self.stdout_watch_id = None
+
+        self._stop_pipe_readers(unlink_pipes=True)
 
     def init(self):
         logger.info("init called")
         self.initialize_rtms_connection()
 
         return
-
-    def discover_chunks(self, indir: Path):
-        """Discover video and audio chunk files in the directory"""
-        vids, auds = [], []
-        if not indir.is_dir():
-            logger.warning(f"Simulation directory not found: {indir}")
-            return vids, auds
-            
-        for p in indir.iterdir():
-            m = VIDEO_RE.match(p.name)
-            if m:
-                ts = int(m.group(1))
-                vids.append((ts, p))
-                continue
-            m = AUDIO_RE.match(p.name)
-            if m:
-                ts = int(m.group(1))
-                auds.append((ts, p))
-        vids.sort(key=lambda x: x[0])
-        auds.sort(key=lambda x: x[0])
-        return vids, auds
-
-    def simulate_video_stream(self, video_chunks, pace=1.0):
-        """Simulate video streaming by reading chunk files and calling the video callback"""
-        logger.info(f"Starting video simulation with {len(video_chunks)} chunks")
-        
-        for idx, (ts_ms, path) in enumerate(video_chunks):
-            if not self.simulation_running:
-                break
-                
-            try:
-                with path.open("rb") as f:
-                    data = f.read()
-                
-                # Calculate timing for pacing
-                if pace > 0 and self.simulation_start_time_ns:
-                    pts_ns = ts_ms * 1_000_000  # ms to ns
-                    target_wall_ns = self.simulation_start_time_ns + int(pts_ns * (1.0 / pace))
-                    
-                    while self.simulation_running:
-                        now_ns = time.monotonic_ns()
-                        if now_ns >= target_wall_ns:
-                            break
-                        time.sleep(0.001)
-                        print(f"Waiting for video chunk {idx+1}/{len(video_chunks)} (ts={ts_ms}ms, size={len(data)} bytes)")
-                
-                if not self.simulation_running:
-                    break
-                    
-                # Send video frame via callback
-                if self.add_video_frame_callback and self.wants_any_video_frames_callback():
-                    current_time_ns = time.time_ns()
-                    print(f"Sending video chunk {idx+1}/{len(video_chunks)} (ts={ts_ms}ms, size={len(data)} bytes)")
-                    self.add_video_frame_callback(data, current_time_ns)
-                    
-                print(f"Sent video chunk {idx+1}/{len(video_chunks)} (ts={ts_ms}ms, size={len(data)} bytes)")
-                
-            except Exception as e:
-                logger.error(f"Error processing video chunk {path}: {e}")
-                
-        logger.info("Video simulation completed")
-
-    def simulate_audio_stream(self, audio_chunks, pace=1.0):
-        """Simulate audio streaming by reading chunk files and calling the audio callback"""
-        logger.info(f"Starting audio simulation with {len(audio_chunks)} chunks")
-        
-        for idx, (ts_ms, path) in enumerate(audio_chunks):
-            if not self.simulation_running:
-                break
-                
-            try:
-                with path.open("rb") as f:
-                    data = f.read()
-                
-                # Calculate timing for pacing
-                if pace > 0 and self.simulation_start_time_ns:
-                    pts_ns = ts_ms * 1_000_000  # ms to ns
-                    target_wall_ns = self.simulation_start_time_ns + int(pts_ns * (1.0 / pace))
-                    
-                    while self.simulation_running:
-                        now_ns = time.monotonic_ns()
-                        if now_ns >= target_wall_ns:
-                            break
-                        time.sleep(0.001)
-                
-                if not self.simulation_running:
-                    break
-                    
-                # Send audio chunk via callback
-                if self.add_mixed_audio_chunk_callback:
-                    self.add_mixed_audio_chunk_callback(data)
-                    
-                logger.debug(f"Sent audio chunk {idx+1}/{len(audio_chunks)} (ts={ts_ms}ms, size={len(data)} bytes)")
-                
-            except Exception as e:
-                logger.error(f"Error processing audio chunk {path}: {e}")
-                
-        logger.info("Audio simulation completed")
-
-    def start_simulation(self, simulation_dir, pace=1.0):
-        """Start the RTMS simulation using chunk files"""
-        simulation_path = Path(simulation_dir)
-        if not simulation_path.is_dir():
-            logger.error(f"Simulation directory not found: {simulation_path}")
-            return
-            
-        video_chunks, audio_chunks = self.discover_chunks(simulation_path)
-        
-        if not video_chunks and not audio_chunks:
-            logger.warning("No simulation chunks found")
-            return
-            
-        logger.info(f"Found {len(video_chunks)} video chunks and {len(audio_chunks)} audio chunks")
-        
-        self.simulation_running = True
-        self.simulation_start_time_ns = time.monotonic_ns()
-        
-        # Start video simulation thread
-        if video_chunks and self.use_video:
-            video_thread = threading.Thread(
-                target=self.simulate_video_stream,
-                args=(video_chunks, pace),
-                daemon=True,
-                name="rtms-video-sim"
-            )
-            video_thread.start()
-            self.simulation_threads.append(video_thread)
-            
-        # Start audio simulation thread  
-        if audio_chunks and self.use_mixed_audio:
-            audio_thread = threading.Thread(
-                target=self.simulate_audio_stream,
-                args=(audio_chunks, pace),
-                daemon=True,
-                name="rtms-audio-sim"
-            )
-            audio_thread.start()
-            self.simulation_threads.append(audio_thread)
 
     def initialize_rtms_connection(self):
         logger.info("Initializing RTMS connection...")
@@ -315,7 +311,21 @@ class ZoomRTMSAdapter(BotAdapter):
             "ZM_RTMS_SECRET": self.zoom_client_secret,
         }
 
+        need_audio = self.use_one_way_audio or self.use_mixed_audio
+        need_video = self.use_video
+
+        # Create FIFOs before launching Node so it can open them immediately
+        if need_audio:
+            self._ensure_fifo(self.audio_pipe_path)
+        if need_video:
+            self._ensure_fifo(self.video_pipe_path)
+
         cmd = ["node", "/home/nduncan/Documents/attendee_stuff/rtms-developer-preview-js/index.js", "--", f"--recording_file_path={recording_file_path}", f"--join_payload={json.dumps(self.zoom_rtms)}"]
+
+        if need_video:
+            cmd.append(f"--video_pipe_path={self.video_pipe_path}")
+        if need_audio:
+            cmd.append(f"--audio_pipe_path={self.audio_pipe_path}")
 
         logger.info(f"Executing RTMS client with command: {' '.join(cmd)}")
 
@@ -338,16 +348,12 @@ class ZoomRTMSAdapter(BotAdapter):
             # Set up stdout monitoring
             self.setup_stdout_monitoring()
 
+
+            # Start pipe readers right away; they will block until Node opens pipes
+            self._start_pipe_readers()
+
             logger.info("RTMS client started successfully")
             self.send_message_callback({"message": self.Messages.APP_SESSION_CONNECTED})
-            
-            # Start simulation (temporary code for testing)
-            simulation_dir = "temp_rtms_output_gold"  # Assume chunks are in a directory
-            if Path(simulation_dir).is_dir():
-                logger.info(f"Starting RTMS simulation from {simulation_dir}")
-                self.start_simulation(simulation_dir, pace=1.0)
-            else:
-                logger.info(f"No simulation directory found at {simulation_dir}, skipping simulation")
                 
         except Exception as e:
             logger.error(f"Failed to start RTMS client: {e}")
