@@ -249,10 +249,12 @@
                                 {% if recording.recording_type != RecordingTypes.NO_RECORDING %}
                                     <div class="video-column">
                                         {% if recording.state == RecordingStates.COMPLETE %}
-                                            <video preload="auto" width="100%" controls id="recording-video">
-                                                <source src="{{ recording.url }}">
-                                                Your browser does not support the video tag.
-                                            </video>
+                                            <div hx-get="{% url 'bots:project-bot-recording' project.object_id bot.object_id recording.object_id %}" 
+                                                 hx-trigger="load"
+                                                 hx-swap="innerHTML">
+                                                <div class="d-flex align-items-center justify-content-center bg-light border rounded" style="height: 300px;">
+                                                </div>
+                                            </div>
                                         {% else %}
                                             <div class="d-flex align-items-center justify-content-center bg-light border rounded" style="height: 300px;">
                                                 <div class="text-center">
@@ -609,68 +611,80 @@
     }
 
     // Add highlighting functionality
-    document.querySelectorAll('video').forEach(video => {
-        video.addEventListener('timeupdate', function() {
-            const container = this.closest('.recording-container');
-            const words = container.querySelectorAll('.word, .word-space');
-            let lastHighlightedUtteranceId = null;
-            
-            // Find utterance bounds
-            const utteranceBounds = {};
-            words.forEach(word => {
-                const utteranceId = word.dataset.utteranceId;
-                if (!utteranceBounds[utteranceId]) {
-                    utteranceBounds[utteranceId] = {
-                        start: Infinity,
-                        end: -Infinity
-                    };
-                }
-                utteranceBounds[utteranceId].start = Math.min(utteranceBounds[utteranceId].start, parseFloat(word.dataset.start) / 1000.0);
-                utteranceBounds[utteranceId].end = Math.max(utteranceBounds[utteranceId].end, parseFloat(word.dataset.end) / 1000.0);
-            });
+    function initializeVideoListeners() {
+        document.querySelectorAll('video').forEach(video => {
+            // Remove existing listener to avoid duplicates
+            video.removeEventListener('timeupdate', handleVideoTimeUpdate);
+            video.addEventListener('timeupdate', handleVideoTimeUpdate);
+        });
+    }
 
-            // Find current utterance
-            for (const [utteranceId, utterance] of Object.entries(utteranceBounds)) {
-                if (this.currentTime >= utterance.start && this.currentTime <= utterance.end) {
-                    lastHighlightedUtteranceId = utteranceId;
-                    break;
-                }
+    function handleVideoTimeUpdate() {
+        const container = this.closest('.recording-container');
+        const words = container.querySelectorAll('.word, .word-space');
+        let lastHighlightedUtteranceId = null;
+        
+        // Find utterance bounds
+        const utteranceBounds = {};
+        words.forEach(word => {
+            const utteranceId = word.dataset.utteranceId;
+            if (!utteranceBounds[utteranceId]) {
+                utteranceBounds[utteranceId] = {
+                    start: Infinity,
+                    end: -Infinity
+                };
             }
-            
-            // Update highlighting
-            let firstWordAfterStart = null;
-            words.forEach(word => {
-                const start = parseFloat(word.dataset.start) / 1000.0;
-                if (this.currentTime <= start && firstWordAfterStart == null) {
-                    firstWordAfterStart = word;
-                }
-                if (this.currentTime > start && word.dataset.utteranceId === lastHighlightedUtteranceId) {
-                    word.classList.add('highlighted');
-                } else {
-                    word.classList.remove('highlighted');
-                }
-            });
-            firstWordAfterStart = firstWordAfterStart || words[words.length - 1];
+            utteranceBounds[utteranceId].start = Math.min(utteranceBounds[utteranceId].start, parseFloat(word.dataset.start) / 1000.0);
+            utteranceBounds[utteranceId].end = Math.max(utteranceBounds[utteranceId].end, parseFloat(word.dataset.end) / 1000.0);
+        });
 
-            // Auto-scroll to first word of highlighted utterance
-            if (firstWordAfterStart) {
-                const firstWord = firstWordAfterStart;
-                const transcriptColumn = container.querySelector('.transcript-column');
-                const wordRect = firstWord.getBoundingClientRect();
-                const containerRect = transcriptColumn.getBoundingClientRect();
-
-                if (wordRect.top < containerRect.top || wordRect.bottom > containerRect.bottom) {
-                    firstWord.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }
-
-                // Bold the timestamp of the first word's utterance
-                const utteranceTimestamp = firstWord.closest('.utterance-item').querySelector('.utterance-timestamp');
-                document.querySelectorAll('.utterance-timestamp').forEach(timestamp => {
-                    timestamp.classList.remove('bold');
-                });
-                utteranceTimestamp.classList.add('bold');
+        // Find current utterance
+        for (const [utteranceId, utterance] of Object.entries(utteranceBounds)) {
+            if (this.currentTime >= utterance.start && this.currentTime <= utterance.end) {
+                lastHighlightedUtteranceId = utteranceId;
+                break;
+            }
+        }
+        
+        // Update highlighting
+        let firstWordAfterStart = null;
+        words.forEach(word => {
+            const start = parseFloat(word.dataset.start) / 1000.0;
+            if (this.currentTime <= start && firstWordAfterStart == null) {
+                firstWordAfterStart = word;
+            }
+            if (this.currentTime > start && word.dataset.utteranceId === lastHighlightedUtteranceId) {
+                word.classList.add('highlighted');
+            } else {
+                word.classList.remove('highlighted');
             }
         });
-    });
+        firstWordAfterStart = firstWordAfterStart || words[words.length - 1];
+
+        // Auto-scroll to first word of highlighted utterance
+        if (firstWordAfterStart) {
+            const firstWord = firstWordAfterStart;
+            const transcriptColumn = container.querySelector('.transcript-column');
+            const wordRect = firstWord.getBoundingClientRect();
+            const containerRect = transcriptColumn.getBoundingClientRect();
+
+            if (wordRect.top < containerRect.top || wordRect.bottom > containerRect.bottom) {
+                firstWord.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+
+            // Bold the timestamp of the first word's utterance
+            const utteranceTimestamp = firstWord.closest('.utterance-item').querySelector('.utterance-timestamp');
+            document.querySelectorAll('.utterance-timestamp').forEach(timestamp => {
+                timestamp.classList.remove('bold');
+            });
+            utteranceTimestamp.classList.add('bold');
+        }
+    }
+
+    // Initialize on page load
+    document.addEventListener('DOMContentLoaded', initializeVideoListeners);
+    
+    // Initialize after HTMX content is loaded
+    document.addEventListener('htmx:afterSwap', initializeVideoListeners);
 </script>
 {% endblock %}

@@ -477,6 +477,17 @@ class ProjectBotDetailView(LoginRequiredMixin, ProjectUrlContextMixin, View):
         return render(request, "projects/project_bot_detail.html", context)
 
 
+class ProjectBotRecordingView(LoginRequiredMixin, ProjectUrlContextMixin, View):
+
+    def get(self, request, object_id, bot_object_id, recording_object_id):
+        project = get_project_for_user(user=request.user, project_object_id=object_id)
+        recording = Recording.objects.get(object_id=recording_object_id, bot__object_id=bot_object_id, bot__project=project)
+        context = {
+            "recording": recording,
+        }
+        return render(request, "projects/partials/project_bot_recording.html", context)
+
+    
 class ProjectWebhooksView(LoginRequiredMixin, ProjectUrlContextMixin, View):
     def get(self, request, object_id):
         project = get_project_for_user(user=request.user, project_object_id=object_id)

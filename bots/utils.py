@@ -470,10 +470,10 @@ def generate_recordings_json_for_bot_detail_view(bot):
     for recording in bot.recordings.all():
         recordings_data.append(
             {
+                "object_id": recording.object_id,
                 "state": recording.state,
                 "recording_type": recording.bot.recording_type(),
                 "transcription_state": recording.transcription_state,
-                "url": recording.url,
                 "utterances": generate_utterance_json_for_bot_detail_view(recording),
                 "failed_utterances": generate_failed_utterance_json_for_bot_detail_view(recording),
             }
