@@ -60,5 +60,12 @@ LOGGING = {
             "level": "INFO",
             "propagate": False,
         },
+        # Uncomment to log database queries
+         "django.db.backends": {
+            "handlers": ["console"],
+            "level": "DEBUG",
+            "propagate": False,
+         },
     },
 }
+
