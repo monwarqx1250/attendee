@@ -121,6 +121,7 @@ class ZoomBotAdapter(BotAdapter):
 
         self.use_raw_recording = True
         self.recording_permission_granted = False
+        self.recording_permission_granted_within_room = False
 
         self.reminder_controller = None
 
@@ -229,6 +230,9 @@ class ZoomBotAdapter(BotAdapter):
             return
 
         if not self.recording_permission_granted:
+            return
+
+        if not self.recording_permission_granted_within_room:
             return
 
         if not self.video_input_manager:
@@ -651,6 +655,7 @@ class ZoomBotAdapter(BotAdapter):
         else:
             logger.info("Bot already has recording permission. This is likely due to joining a breakout room. Not sending recording permission granted message again.")
         self.recording_permission_granted = True
+        self.recording_permission_granted_within_room = True
 
         GLib.timeout_add(100, self.set_up_video_input_manager)
 
@@ -762,6 +767,10 @@ class ZoomBotAdapter(BotAdapter):
 
         if status == zoom.MEETING_STATUS_JOIN_BREAKOUT_ROOM:
             logger.info("Bot joined breakout room")
+            self.recording_permission_granted_within_room = False
+        if status == zoom.MEETING_STATUS_LEAVE_BREAKOUT_ROOM:
+            logger.info("Bot left breakout room")
+            self.recording_permission_granted_within_room = False
 
         if status == zoom.MEETING_STATUS_IN_WAITING_ROOM:
             self.send_message_callback({"message": self.Messages.BOT_PUT_IN_WAITING_ROOM})
