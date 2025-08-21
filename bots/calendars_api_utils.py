@@ -1,7 +1,12 @@
+import logging
+import uuid
+
 from django.db import IntegrityError, transaction
 
-from .models import Calendar, CalendarStates
+from .models import Bot, BotStates, Calendar, CalendarStates, Project
 from .serializers import CreateCalendarSerializer
+
+logger = logging.getLogger(__name__)
 
 
 def create_calendar(data, project):
@@ -43,6 +48,46 @@ def create_calendar(data, project):
         if "deduplication_key" in str(e).lower():
             return None, {"deduplication_key": ["A calendar with this deduplication key already exists in this project."]}
         else:
-            return None, {"non_field_errors": ["An error occurred while creating the calendar: " + str(e)]}
+            error_id = str(uuid.uuid4())
+            logger.error(f"Error creating calendar (error_id={error_id}): {e}")
+            return None, {"non_field_errors": ["An error occurred while creating the calendar. Error ID: " + error_id]}
     except Exception as e:
-        return None, {"non_field_errors": ["An unexpected error occurred while creating the calendar: " + str(e)]}
+        error_id = str(uuid.uuid4())
+        logger.error(f"Error creating calendar (error_id={error_id}): {e}")
+        return None, {"non_field_errors": ["An unexpected error occurred while creating the calendar. Error ID: " + error_id]}
+
+
+def remove_bots_from_calendar(calendar: Calendar, project: Project):
+    """
+    Remove all scheduled bots from a calendar using bulk delete.
+
+    Args:
+        calendar: Calendar instance to remove bots from
+    """
+
+    # Bulk delete all scheduled bots for this calendar
+    try:
+        deleted_count, _ = Bot.objects.filter(calendar_event__calendar=calendar, state=BotStates.SCHEDULED, project=project).delete()
+
+        logger.info(f"remove_bots_from_calendar deleted {deleted_count} scheduled bots from calendar {calendar.id}")
+    except Exception as e:
+        logger.exception(f"remove_bots_from_calendar failed to delete scheduled bots from calendar {calendar.id}: {e}")
+
+
+def delete_calendar(calendar: Calendar) -> tuple[bool, dict]:
+    """
+    Delete a calendar and all associated data.
+
+    Args:
+        calendar: Calendar instance to delete
+    """
+    try:
+        with transaction.atomic():
+            remove_bots_from_calendar(calendar=calendar, project=calendar.project)
+            calendar.delete()
+
+        return True, None
+    except Exception as e:
+        error_id = str(uuid.uuid4())
+        logger.error(f"Error deleting calendar (error_id={error_id}): {e}")
+        return False, {"non_field_errors": ["An unexpected error occurred while deleting the calendar. Error ID: " + error_id]}

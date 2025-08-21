@@ -90,6 +90,7 @@ class Calendar(models.Model):
     last_successful_sync_time_window_end = models.DateTimeField(null=True, blank=True)
     last_successful_sync_started_at = models.DateTimeField(null=True, blank=True)
     sync_task_enqueued_at = models.DateTimeField(null=True, blank=True)
+    sync_task_requested_at = models.DateTimeField(null=True, blank=True)
 
     _encrypted_data = models.BinaryField(
         null=True,
@@ -144,6 +145,7 @@ class CalendarEvent(models.Model):
     is_deleted = models.BooleanField(default=False)
     attendees = models.JSONField(null=True, blank=True)
     ical_uid = models.CharField(max_length=1024, null=True, blank=True)
+    name = models.CharField(max_length=1024, null=True, blank=True)
 
     raw = models.JSONField()
 

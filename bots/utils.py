@@ -294,7 +294,7 @@ class AggregatedUtterance:
 
 
 def generate_aggregated_utterances(recording):
-    utterances_sorted = recording.utterances.all().order_by("timestamp_ms")
+    utterances_sorted = sorted(recording.utterances.all(), key=lambda x: x.timestamp_ms)
 
     aggregated_utterances = []
     current_aggregated_utterance = None

@@ -1,15 +1,19 @@
+import copy
 import logging
 import re
 from datetime import datetime, timedelta
 from datetime import timezone as python_timezone
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
+import dateutil.parser
 import requests
 from celery import shared_task
 from django.db import transaction
 from django.utils import timezone
 
 from bots.bots_api_utils import delete_bot, patch_bot
+from bots.calendars_api_utils import remove_bots_from_calendar
 from bots.models import Bot, BotStates, Calendar, CalendarEvent, CalendarPlatform, CalendarStates, WebhookTriggerTypes
 from bots.utils import meeting_type_from_url
 from bots.webhook_payloads import calendar_webhook_payload
@@ -17,17 +21,26 @@ from bots.webhook_utils import trigger_webhook
 
 logger = logging.getLogger(__name__)
 
+URL_CANDIDATE = re.compile(r"https?://[^\s<>\"']+")
+
 
 def extract_meeting_url_from_text(text: str) -> Optional[str]:
     if not text:
         return None
-
-    # Split text by space, newlines, quotes, and angle brackets
-    words = re.split(r'[\s\n"\'<>]+', text)
-    for word in words:
-        if word and meeting_type_from_url(word):
-            return word
+    for m in URL_CANDIDATE.finditer(text):
+        url = m.group(0).rstrip(").,;]}>")
+        if meeting_type_from_url(url):
+            return url
     return None
+
+
+def _exception_is_404(e: Exception) -> bool:
+    """Check if an exception is a 404."""
+    # Check if it's a requests HTTPError with status code 404
+    if isinstance(e, requests.HTTPError) and hasattr(e, "response") and e.response is not None:
+        return e.response.status_code == 404
+
+    return False
 
 
 def sync_bot_with_calendar_event(bot: Bot, calendar_event: CalendarEvent):
@@ -75,6 +88,7 @@ def enqueue_sync_calendar_task(calendar: Calendar):
     """Enqueue a sync calendar task for a calendar."""
     with transaction.atomic():
         calendar.sync_task_enqueued_at = timezone.now()
+        calendar.sync_task_requested_at = None
         calendar.save()
         sync_calendar.delay(calendar.id)
 
@@ -132,8 +146,8 @@ class CalendarSyncHandler:
         Returns:
             tuple: (CalendarEvent instance, was_created, was_updated)
         """
-        platform_uuid = remote_event["id"]
         event_data = self._remote_event_to_calendar_event_data(remote_event)
+        platform_uuid = event_data["platform_uuid"]
 
         try:
             # Try to get existing event
@@ -163,6 +177,9 @@ class CalendarSyncHandler:
         local_event.is_deleted = True
         local_event.save()
 
+        # Sync the bots for the calendar event
+        sync_bots_for_calendar_event(local_event)
+
     def sync_events(self) -> dict:
         """
         Main sync method that coordinates the entire sync process.
@@ -183,14 +200,14 @@ class CalendarSyncHandler:
             # Set the sync start time
             sync_started_at = timezone.now()
 
-            # Perform sync within transaction
+            # Step 1: Pull from Remote Calendar
+
+            # Step 1a: List all events from Remote Calendar within time window
+            remote_events = self._list_events(access_token)
+            remote_event_ids = {event["id"] for event in remote_events}
+
+            # Start transaction
             with transaction.atomic():
-                # Step 1: Pull from Remote Calendar
-
-                # Step 1a: List all events from Remote Calendar within time window
-                remote_events = self._list_events(access_token)
-                remote_event_ids = {event["id"] for event in remote_events}
-
                 # Step 1b: Find local events not in the remote fetch and get them individually
                 local_events = self._get_local_events_in_window()
                 local_events_missing_from_remote = set(local_events.keys()) - remote_event_ids
@@ -261,23 +278,23 @@ class CalendarSyncHandler:
 
         except CalendarAPIAuthenticationError as e:
             # Update calendar state to indicate failure
-            calendar_original_state = self.calendar.state
-            self.calendar.state = CalendarStates.DISCONNECTED
-            self.calendar.connection_failure_data = {
-                "error": str(e),
-                "timestamp": timezone.now().isoformat(),
-            }
-            self.calendar.save()
+            with transaction.atomic():
+                remove_bots_from_calendar(calendar=self.calendar, project=self.calendar.project)
+                self.calendar.state = CalendarStates.DISCONNECTED
+                self.calendar.connection_failure_data = {
+                    "error": str(e),
+                    "timestamp": timezone.now().isoformat(),
+                }
+                self.calendar.save()
 
             logger.exception(f"Calendar sync failed with CalendarAPIAuthenticationError for {self.calendar.object_id}: {e}")
 
             # Create webhook event
-            if calendar_original_state != CalendarStates.DISCONNECTED:
-                trigger_webhook(
-                    webhook_trigger_type=WebhookTriggerTypes.CALENDAR_STATE_CHANGE,
-                    calendar=self.calendar,
-                    payload=calendar_webhook_payload(self.calendar),
-                )
+            trigger_webhook(
+                webhook_trigger_type=WebhookTriggerTypes.CALENDAR_STATE_CHANGE,
+                calendar=self.calendar,
+                payload=calendar_webhook_payload(self.calendar),
+            )
 
         except Exception as e:
             logger.exception(f"Calendar sync failed with {type(e).__name__} for {self.calendar.object_id}: {e}")
@@ -395,24 +412,31 @@ class GoogleCalendarSyncHandler(CalendarSyncHandler):
             logger.info(f"Fetching individual event {event_id} from Google Calendar")
             return self._make_gcal_request(url, access_token)
         except Exception as e:
-            if "404" in str(e):
+            if _exception_is_404(e):
                 logger.info(f"Event {event_id} not found in Google Calendar")
                 # Event was deleted
                 return None
             raise
 
-    def _parse_event_datetime(self, event_datetime: dict) -> datetime:
-        """Parse Google Calendar event datetime."""
+    def _parse_event_datetime(self, event_datetime: dict, default_tz: str = "UTC", normalize_to_utc: bool = False) -> datetime:
+        """Parse Google Calendar event datetime dict (start/end)."""
+        if not event_datetime:
+            raise ValueError("Invalid event datetime")
+
+        tzname = event_datetime.get("timeZone") or default_tz
+
         if "dateTime" in event_datetime:
-            # Event with specific time
-            dt_str = event_datetime["dateTime"]
-            return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+            dt = dateutil.parser.isoparse(event_datetime["dateTime"])  # handles Z, offsets, subsecond
+            if dt.tzinfo is None:  # just in case a "floating" time arrives
+                dt = dt.replace(tzinfo=ZoneInfo(tzname))
         elif "date" in event_datetime:
-            # All-day event
-            date_str = event_datetime["date"]
-            return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=python_timezone.utc)
+            # All-day: interpret as midnight at the event's timezone
+            d = datetime.strptime(event_datetime["date"], "%Y-%m-%d").date()
+            dt = datetime(d.year, d.month, d.day, tzinfo=ZoneInfo(tzname))
         else:
             raise ValueError(f"Invalid event datetime format: {event_datetime}")
+
+        return dt.astimezone(python_timezone.utc) if normalize_to_utc else dt
 
     def _truncate_large_text_fields_in_gcal_event(self, google_event: dict) -> dict:
         """Truncate large text fields in a Google Calendar event. Return a copy of the event with the fields truncated."""
@@ -429,14 +453,14 @@ class GoogleCalendarSyncHandler(CalendarSyncHandler):
         end_time = self._parse_event_datetime(google_event["end"])
 
         # Extract meeting URL if present
-        meeting_url = None
+        meeting_url_from_conference_data = None
         if "conferenceData" in google_event:
             entry_points = google_event["conferenceData"].get("entryPoints", [])
             for entry_point in entry_points:
                 if entry_point.get("entryPointType") == "video":
-                    meeting_url = entry_point.get("uri")
+                    meeting_url_from_conference_data = entry_point.get("uri")
                     break
-        meeting_url = meeting_url or extract_meeting_url_from_text(google_event.get("description")) or extract_meeting_url_from_text(google_event.get("summary"))
+        meeting_url = extract_meeting_url_from_text(meeting_url_from_conference_data) or extract_meeting_url_from_text(google_event.get("hangoutLink")) or extract_meeting_url_from_text(google_event.get("location")) or extract_meeting_url_from_text(google_event.get("description")) or extract_meeting_url_from_text(google_event.get("summary"))
 
         # Extract attendees
         attendees = []
@@ -452,6 +476,7 @@ class GoogleCalendarSyncHandler(CalendarSyncHandler):
         return {
             "platform_uuid": google_event["id"],
             "meeting_url": meeting_url,
+            "name": google_event.get("summary"),
             "start_time": start_time,
             "end_time": end_time,
             "attendees": attendees,
@@ -474,7 +499,7 @@ class MicrosoftCalendarSyncHandler(CalendarSyncHandler):
 
     TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
     GRAPH_BASE = "https://graph.microsoft.com/v1.0"
-    CALENDAR_EVENT_SELECT_FIELDS = "id,subject,start,end,attendees,organizer,iCalUId,isCancelled,isOnlineMeeting,onlineMeetingProvider,onlineMeeting,onlineMeetingUrl,location,body,webLink"
+    CALENDAR_EVENT_SELECT_FIELDS = "id,subject,start,end,attendees,organizer,iCalUId,seriesMasterId,isCancelled,isOnlineMeeting,onlineMeetingProvider,onlineMeeting,onlineMeetingUrl,location,body,webLink"
 
     def _raise_if_error_is_authentication_error(self, e: requests.RequestException):
         if e.response.json().get("error") == "invalid_grant":
@@ -568,9 +593,20 @@ class MicrosoftCalendarSyncHandler(CalendarSyncHandler):
     # Listing & single fetch
     # ---------------------------
     def _format_dt_for_graph(self, dt: datetime) -> str:
-        """Return RFC3339 UTC format the Graph likes: YYYY-MM-DDTHH:MM:SSZ"""
-        dt_utc = dt.astimezone(python_timezone.utc)
-        return dt_utc.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        """Return RFC3339 UTC like 2025-08-20T15:30:00Z (seconds precision)."""
+        if dt.tzinfo is None:
+            # If you *know* your inputs are always aware, you can assert instead.
+            raise ValueError("Naive datetime passed to _format_dt_for_graph")
+        return dt.astimezone(python_timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _calendar_base_url(self) -> str:
+        """
+        Return the base path for calendar-scoped calls.
+        If platform_uuid is set, scope to that calendar; otherwise use the user's primary.
+        """
+        if self.calendar.platform_uuid:
+            return f"{self.GRAPH_BASE}/me/calendars/{self.calendar.platform_uuid}"
+        return f"{self.GRAPH_BASE}/me"
 
     def _list_events(self, access_token: str) -> List[dict]:
         """
@@ -580,7 +616,7 @@ class MicrosoftCalendarSyncHandler(CalendarSyncHandler):
         start = self._format_dt_for_graph(self.time_window_start)
         end = self._format_dt_for_graph(self.time_window_end)
 
-        base_url = f"{self.GRAPH_BASE}/me/calendarView"
+        base_url = f"{self._calendar_base_url()}/calendarView"
         params = {
             "startDateTime": start,
             "endDateTime": end,
@@ -611,14 +647,14 @@ class MicrosoftCalendarSyncHandler(CalendarSyncHandler):
         """
         Fetch a specific event by id. If it's been deleted, Graph returns 404.
         """
-        url = f"{self.GRAPH_BASE}/me/events/{event_id}"
+        url = f"{self._calendar_base_url()}/events/{event_id}"
         params = {
             "$select": self.CALENDAR_EVENT_SELECT_FIELDS,
         }
         try:
             return self._make_graph_request(url, access_token, params)
         except Exception as e:
-            if "404" in str(e):
+            if _exception_is_404(e):
                 logger.info("Event %s not found in Microsoft Graph", event_id)
                 return None  # Event was deleted
             raise
@@ -626,34 +662,29 @@ class MicrosoftCalendarSyncHandler(CalendarSyncHandler):
     # ---------------------------
     # Mapping helpers
     # ---------------------------
-    def _parse_ms_datetime(self, dt_str: str, tz_name: Optional[str]) -> datetime:
+    def _parse_ms_datetime(self, dt_str: str, tz_name: str | None) -> datetime:
         """
-        Parse Graph dateTime strings robustly:
-        - We set Prefer: outlook.timezone="UTC", so tz_name should be 'UTC' and dt_str has no offset.
-        - Graph can return 7-digit fractional seconds; Python supports up to 6, so truncate.
+        Parse Microsoft Graph dateTime strings.
+
+        - Works with 'Z', offsets, and >6-digit fractional seconds.
+        - If the string is naive, attach tz_name (usually 'UTC' when using
+        Prefer: outlook.timezone="UTC"), else default to UTC.
         """
         if not dt_str:
             raise ValueError("Empty dateTime")
 
-        s = dt_str.replace("Z", "+00:00")  # handle Z form if present
-        # If offset is present, let fromisoformat handle it directly
-        if ("+" in s[10:] or "-" in s[10:]) and s[-3] == ":":
-            # offset like +00:00
-            return datetime.fromisoformat(s)
+        dt = dateutil.parser.isoparse(dt_str)  # handles Z, offsets, long fractions
 
-        # No offset: trim fractional seconds to 6 digits if present
-        if "." in s:
-            main, frac = s.split(".", 1)
-            frac_digits = "".join(ch for ch in frac if ch.isdigit())
-            if len(frac_digits) > 6:
-                frac_digits = frac_digits[:6]
-            else:
-                frac_digits = frac_digits.ljust(6, "0")
-            s = f"{main}.{frac_digits}"
-        dt = datetime.fromisoformat(s)
-        # Attach UTC if no tzinfo (should be, given our Prefer header)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=python_timezone.utc)
+            if tz_name:
+                try:
+                    dt = dt.replace(tzinfo=ZoneInfo(tz_name))
+                except Exception:
+                    # Fallback if tz_name is unknown on the system
+                    dt = dt.replace(tzinfo=python_timezone.utc)
+            else:
+                dt = dt.replace(tzinfo=python_timezone.utc)
+
         return dt
 
     def _extract_meeting_url(self, ev: dict) -> Optional[str]:
@@ -665,10 +696,10 @@ class MicrosoftCalendarSyncHandler(CalendarSyncHandler):
           3) (fallback) None
         """
         online_meeting = ev.get("onlineMeeting") or {}
-        join_url = online_meeting.get("joinUrl")
+        join_url = extract_meeting_url_from_text(online_meeting.get("joinUrl"))
         if join_url:
             return join_url
-        legacy = ev.get("onlineMeetingUrl")
+        legacy = extract_meeting_url_from_text(ev.get("onlineMeetingUrl"))
         if legacy:
             return legacy
 
@@ -684,7 +715,7 @@ class MicrosoftCalendarSyncHandler(CalendarSyncHandler):
 
     def _truncate_large_text_fields_in_ms_event(self, ms_event: dict) -> dict:
         """Truncate large text fields in a Microsoft Graph event. Return a copy of the event with the fields truncated."""
-        event_copy = ms_event.copy()
+        event_copy = copy.deepcopy(ms_event)
         if event_copy.get("body") and event_copy.get("body").get("content"):
             event_copy["body"]["content"] = event_copy.get("body").get("content")[:8000]
         return event_copy
@@ -713,6 +744,7 @@ class MicrosoftCalendarSyncHandler(CalendarSyncHandler):
         return {
             "platform_uuid": ms_event.get("id"),
             "meeting_url": meeting_url,
+            "name": ms_event.get("subject"),
             "start_time": start_time,
             "end_time": end_time,
             "attendees": attendees_out,

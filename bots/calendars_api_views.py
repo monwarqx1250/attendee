@@ -7,9 +7,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .authentication import ApiKeyAuthentication
-from .calendars_api_utils import create_calendar
+from .calendars_api_utils import create_calendar, delete_calendar
 from .models import Calendar, CalendarEvent
 from .serializers import CalendarEventSerializer, CalendarSerializer, CreateCalendarSerializer, PatchCalendarSerializer
+from .tasks.sync_calendar_task import enqueue_sync_calendar_task
 
 TokenHeaderParameter = [
     OpenApiParameter(
@@ -36,8 +37,8 @@ NewlyCreatedCalendarExample = OpenApiExample(
         "id": "cal_abcdef1234567890",
         "platform": "google",
         "state": "connected",
-        "metadata": {"department": "engineering", "team": "backend"},
-        "deduplication_key": "engineering-main-calendar",
+        "metadata": {"tenant_id": "1234567890"},
+        "deduplication_key": "user-abcd",
         "connection_failure_data": None,
         "created_at": "2025-01-13T10:30:00.123456Z",
         "updated_at": "2025-01-13T10:30:00.123456Z",
@@ -81,7 +82,7 @@ class CalendarListCreateView(GenericAPIView):
                 location=OpenApiParameter.QUERY,
                 description="Filter calendars by deduplication key",
                 required=False,
-                examples=[OpenApiExample("Deduplication Key Example", value="engineering-main-calendar")],
+                examples=[OpenApiExample("Deduplication Key Example", value="user-abcd")],
             ),
         ],
         tags=["Calendars"],
@@ -126,10 +127,13 @@ class CalendarListCreateView(GenericAPIView):
         if error:
             return Response(error, status=status.HTTP_400_BAD_REQUEST)
 
+        # Immediately sync the calendar
+        enqueue_sync_calendar_task(calendar)
+
         return Response(CalendarSerializer(calendar).data, status=status.HTTP_201_CREATED)
 
 
-class CalendarDetailView(APIView):
+class CalendarDetailPatchDeleteView(APIView):
     authentication_classes = [ApiKeyAuthentication]
 
     @extend_schema(
@@ -224,6 +228,10 @@ class CalendarDetailView(APIView):
             calendar.set_credentials(existing_credentials)
 
         calendar.save()
+
+        # Request an immediate sync of the calendar
+        enqueue_sync_calendar_task(calendar)
+
         return Response(CalendarSerializer(calendar).data, status=status.HTTP_200_OK)
 
     @extend_schema(
@@ -249,8 +257,10 @@ class CalendarDetailView(APIView):
     def delete(self, request, object_id):
         try:
             calendar = Calendar.objects.get(object_id=object_id, project=request.auth.project)
-            calendar.delete()
-            return Response({"message": "Calendar deleted successfully"}, status=status.HTTP_200_OK)
+            success, error = delete_calendar(calendar)
+            if error:
+                return Response(error, status=status.HTTP_400_BAD_REQUEST)
+            return Response(status=status.HTTP_200_OK)
         except Calendar.DoesNotExist:
             return Response({"error": "Calendar not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -298,7 +308,7 @@ class CalendarEventListView(GenericAPIView):
                 location=OpenApiParameter.QUERY,
                 description="Filter events by calendar deduplication key",
                 required=False,
-                examples=[OpenApiExample("Deduplication Key Example", value="user@customer-domain.com")],
+                examples=[OpenApiExample("Deduplication Key Example", value="user-abcd")],
             ),
             OpenApiParameter(
                 name="updated_after",
@@ -338,7 +348,7 @@ class CalendarEventListView(GenericAPIView):
             except ValueError:
                 return Response({"error": "Invalid updated_after format. Use ISO 8601 format (e.g., 2025-01-13T10:30:00Z)"}, status=status.HTTP_400_BAD_REQUEST)
 
-        events = events.order_by("-updated_at")
+        events = events.order_by("-created_at")
 
         # Let the pagination class handle the rest
         page = self.paginate_queryset(events)

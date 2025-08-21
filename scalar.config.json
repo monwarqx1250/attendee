@@ -36,6 +36,10 @@
         {
           "path": "docs/faq.md",
           "type": "page"
+        },
+        {
+          "path": "docs/calendar_integration.md",
+          "type": "page"
         }
       ]
     }

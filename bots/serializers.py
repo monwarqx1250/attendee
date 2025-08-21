@@ -372,7 +372,7 @@ class ZoomSettingsJSONField(serializers.JSONField):
             },
             "only_participant_in_meeting_timeout_seconds": {
                 "type": "integer",
-                "description": "Number of seconds to wait before leaving if bot is the only participant",
+                "description": "Number of seconds to wait before leaving if bot becomes the only participant in the meeting because everyone else left.",
                 "default": 60,
             },
             "wait_for_host_to_start_meeting_timeout_seconds": {
@@ -1459,19 +1459,8 @@ class PatchBotSerializer(BotValidationMixin, serializers.Serializer):
     examples=[
         OpenApiExample(
             "Create Google Calendar",
-            value={"client_id": "123456789-abcdefghijklmnopqrstuvwxyz.apps.googleusercontent.com", "client_secret": "GOCSPX-abcdefghijklmnopqrstuvwxyz", "refresh_token": "1//04abcdefghijklmnopqrstuvwxyz", "platform": "google", "metadata": {"department": "engineering", "team": "backend"}, "deduplication_key": "engineering-main-calendar"},
+            value={"client_id": "123456789-abcdefghijklmnopqrstuvwxyz.apps.googleusercontent.com", "client_secret": "GOCSPX-abcdefghijklmnopqrstuvwxyz", "refresh_token": "1//04abcdefghijklmnopqrstuvwxyz", "platform": "google", "metadata": {"tenant_id": "1234567890"}, "deduplication_key": "user-abcd"},
             description="Example of creating a Google calendar connection",
-        ),
-        OpenApiExample(
-            "Create Microsoft Calendar",
-            value={
-                "client_id": "12345678-1234-1234-1234-123456789abc",
-                "client_secret": "abcdefghijklmnopqrstuvwxyz123456",
-                "refresh_token": "0.AXA1234567890abcdef",
-                "platform": "microsoft",
-                "metadata": {"department": "sales"},
-            },
-            description="Example of creating a Microsoft calendar connection",
         ),
     ]
 )
@@ -1683,21 +1672,29 @@ class PatchCalendarSerializer(serializers.Serializer):
                 "calendar_id": "cal_abcdef1234567890",
                 "platform_uuid": "google_event_123456789",
                 "meeting_url": "https://meet.google.com/abc-defg-hij",
+                "name": "Event Name",
                 "start_time": "2025-01-15T14:00:00Z",
                 "end_time": "2025-01-15T15:00:00Z",
                 "is_deleted": False,
                 "attendees": [{"email": "user1@example.com", "name": "John Doe"}, {"email": "user2@example.com", "name": "Jane Smith"}],
                 "raw": {"google_event_data": "..."},
+                "bots": [{"id": "bot_abcdef1234567890", "metadata": {"customer_id": "abc123"}, "meeting_url": "https://meet.google.com/abc-defg-hij", "state": "joined_recording", "events": [], "transcription_state": "complete", "recording_state": "complete", "join_at": "2025-01-15T14:00:00Z"}],
                 "created_at": "2025-01-13T10:30:00.123456Z",
                 "updated_at": "2025-01-13T10:30:00.123456Z",
             },
-            description="Example of a calendar event",
+            description="Example of a calendar event with associated bots",
         )
     ]
 )
 class CalendarEventSerializer(serializers.ModelSerializer):
     id = serializers.CharField(source="object_id")
     calendar_id = serializers.CharField(source="calendar.object_id")
+    bots = serializers.SerializerMethodField()
+
+    @extend_schema_field(BotSerializer(many=True))
+    def get_bots(self, obj):
+        """Get associated bots for this calendar event"""
+        return BotSerializer(obj.bots.all(), many=True).data
 
     class Meta:
         model = CalendarEvent
@@ -1711,7 +1708,9 @@ class CalendarEventSerializer(serializers.ModelSerializer):
             "is_deleted",
             "attendees",
             "ical_uid",
+            "name",
             "raw",
+            "bots",
             "created_at",
             "updated_at",
         ]
