@@ -26,6 +26,16 @@ urlpatterns = [
         name="app-session-media",
     ),
     path(
+        "app_sessions/<str:object_id>/transcript",
+        bots_api_views.TranscriptView.as_view(),
+        name="app-session-transcript",
+    ),
+    path(
+        "app_sessions/<str:object_id>/participant_events",
+        bots_api_views.ParticipantEventsView.as_view(),
+        name="app-session-participant-events",
+    ),
+    path(
         "bots/<str:object_id>/transcript",
         bots_api_views.TranscriptView.as_view(),
         name="bot-transcript",

@@ -142,6 +142,8 @@ class ZoomRTMSAdapter(BotAdapter):
         self.stop_pipe_reading = False
         self.pipe_reading_lock = threading.Lock()
 
+        self.last_audio_frame_speaker_name = None
+
     def _read_exact(self, f, n: int) -> bytes | None:
         """Read exactly n bytes from file-like f (blocking). Return None on EOF."""
         buf = bytearray()
@@ -154,7 +156,7 @@ class ZoomRTMSAdapter(BotAdapter):
 
     def _read_audio_frames_from_fd(self, fd: int, on_frame):
         """
-        Blocking loop: read [int32LE length][payload] audio frames from fd and call on_frame(bytes).
+        Blocking loop: read [int32LE username_length][username][int32LE data_length][payload] audio frames from fd and call on_frame(bytes, username).
         """
         try:
             # buffering=0 gives us unbuffered reads so length boundaries behave nicely
@@ -163,17 +165,39 @@ class ZoomRTMSAdapter(BotAdapter):
                     with self.pipe_reading_lock:
                         if self.stop_pipe_reading:
                             break
-                    header = self._read_exact(f, 4)
-                    if header is None:
+                    
+                    # Audio format: username_length + username + data_length + data
+                    username_length_header = self._read_exact(f, 4)
+                    if username_length_header is None:
                         break
-                    (size,) = struct.unpack("<i", header)
-                    if size <= 0:
+                    (username_length,) = struct.unpack("<i", username_length_header)
+                    
+                    if username_length < 0:
                         continue
-                    data = self._read_exact(f, size)
+                        
+                    username_bytes = b""
+                    if username_length > 0:
+                        username_bytes = self._read_exact(f, username_length)
+                        if username_bytes is None:
+                            break
+                    
+                    username = username_bytes.decode('utf-8', errors='replace')
+                    
+                    # Now read the audio data length and data
+                    data_length_header = self._read_exact(f, 4)
+                    if data_length_header is None:
+                        break
+                    (data_length,) = struct.unpack("<i", data_length_header)
+                    
+                    if data_length <= 0:
+                        continue
+                        
+                    data = self._read_exact(f, data_length)
                     if data is None:
                         break
+                    
                     try:
-                        on_frame(data)
+                        on_frame(data, username)
                     except Exception:
                         logger.exception("Error in audio frame callback")
         except Exception:
@@ -230,11 +254,12 @@ class ZoomRTMSAdapter(BotAdapter):
             # Normal during shutdown if we close fds
             logger.exception("Video pipe reader exiting")
 
-    def _on_audio_frame(self, frame: bytes):
+    def _on_audio_frame(self, frame: bytes, userName: str):
         """
         Called for each Opus audio frame (mixed, 16kHz mono).
         """
         self.last_audio_received_at = time.time()
+        self.last_audio_frame_speaker_name = userName
         try:
             # Prefer mixed-audio callback when available.
             if self.use_mixed_audio and self.add_mixed_audio_chunk_callback:
@@ -260,7 +285,7 @@ class ZoomRTMSAdapter(BotAdapter):
             if self.add_video_frame_callback:
                 # Many pipelines just accept the encoded bytes; if yours needs metadata,
                 # pass it here (e.g., codec, width/height).
-                self.add_video_frame_callback(frame, time.time_ns(), userName)
+                self.add_video_frame_callback(frame, time.time_ns(), self.last_audio_frame_speaker_name or "")
         except Exception:
             logger.exception("Video frame handling failed")
 
